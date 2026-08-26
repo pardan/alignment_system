@@ -1,729 +1,94 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Raspberry Pi Configurator</title>
-    <!-- Call the LOCAL Tailwind JS file -->
-    <script src="/static/tailwind.js"></script>
-    <style>
-        body { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
-        .alert-enter { opacity: 0; transform: translateY(-20px); }
-        .alert-enter-active { opacity: 1; transform: translateY(0); transition: opacity 300ms, transform 300ms; }
-        .alert-exit { opacity: 1; transform: translateY(0); }
-        .alert-exit-active { opacity: 0; transform: translateY(-20px); transition: opacity 300ms, transform 300ms; }
-        .content-section { display: none; }
-        .content-section.active { display: block; }
-    </style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>STARS-105 · Alignment Console</title>
+  <style>
+    :root { --bg:#07111f; --surface:#0d1b2d; --surface-2:#12243a; --line:#24364f; --text:#ecf4ff; --muted:#91a4bd; --brand:#38bdf8; --brand-strong:#0284c7; --success:#34d399; --warning:#fbbf24; --danger:#fb7185; }
+    * { box-sizing:border-box; }
+    body { margin:0; color:var(--text); background:radial-gradient(circle at 88% -5%, #123c63 0, transparent 28rem), var(--bg); font:14px/1.5 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    button, input, textarea { font:inherit; }
+    .shell { min-height:100vh; display:grid; grid-template-columns:248px minmax(0,1fr); }
+    .sidebar { padding:24px 16px; background:rgba(7,17,31,.82); border-right:1px solid var(--line); display:flex; flex-direction:column; gap:28px; backdrop-filter:blur(16px); }
+    .brand { display:flex; align-items:center; gap:12px; padding:0 8px; }
+    .brand-mark { width:38px; height:38px; display:grid; place-items:center; border-radius:12px; color:#04111e; background:linear-gradient(135deg,#67e8f9,#0ea5e9); font-size:18px; font-weight:900; box-shadow:0 8px 24px #0284c766; }
+    .brand strong { display:block; letter-spacing:.04em; } .brand small { color:var(--muted); }
+    .nav { display:grid; gap:7px; } .nav a { display:flex; align-items:center; gap:11px; padding:11px 12px; border-radius:10px; color:var(--muted); text-decoration:none; font-weight:650; transition:.18s ease; }
+    .nav a:hover, .nav a.active { color:#e9fbff; background:#163553; } .nav .icon { width:20px; text-align:center; }
+    .side-footer { margin-top:auto; padding:14px; border:1px solid var(--line); border-radius:12px; color:var(--muted); background:#0b192a; font-size:12px; } .side-footer b { color:var(--success); }
+    main { min-width:0; padding:28px clamp(20px,4vw,56px) 48px; }
+    .topbar { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; margin-bottom:30px; } h1 { margin:0; font-size:clamp(24px,3vw,34px); letter-spacing:-.04em; } .eyebrow { margin:0 0 5px; color:var(--brand); font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.14em; } .muted { color:var(--muted); }
+    .live-pill { display:flex; align-items:center; gap:8px; padding:8px 11px; color:#c8ffe9; background:#0f302b; border:1px solid #1f6457; border-radius:999px; font-size:12px; white-space:nowrap; }.dot { width:8px; height:8px; border-radius:50%; background:var(--success); box-shadow:0 0 0 4px #34d39922; }.dot.off { background:var(--danger); box-shadow:0 0 0 4px #fb718522; }
+    .view { display:none; } .view.active { display:block; animation:show .22s ease; } @keyframes show { from {opacity:0; transform:translateY(5px)} to {opacity:1; transform:none} }
+    .cards { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:14px; margin-bottom:22px; }.card,.panel { background:linear-gradient(145deg,rgba(18,36,58,.96),rgba(10,24,40,.96)); border:1px solid var(--line); border-radius:16px; box-shadow:0 14px 35px #0208122e; }.card { padding:17px; }.card-label { color:var(--muted); font-size:12px; }.card-value { margin-top:8px; font-size:23px; font-weight:750; letter-spacing:-.035em; }.card-detail { margin-top:3px; color:var(--muted); font-size:12px; }
+    .panel { padding:22px; }.panel + .panel { margin-top:16px; }.panel-header { display:flex; justify-content:space-between; gap:16px; align-items:flex-start; margin-bottom:20px; }.panel h2 { margin:0; font-size:17px; letter-spacing:-.02em; }.panel p { margin:4px 0 0; }.badge { padding:4px 8px; color:#b7efff; background:#0e3651; border:1px solid #1a567b; border-radius:999px; font-size:11px; font-weight:750; white-space:nowrap; }
+    .form-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }.field { display:grid; gap:7px; }.field.wide { grid-column:1/-1; }.field label { color:#cbd9eb; font-size:12px; font-weight:700; }.field .hint { margin:-2px 0 0; color:var(--muted); font-size:11px; } input,textarea { width:100%; padding:10px 12px; color:var(--text); background:#081727; border:1px solid #2c435e; border-radius:9px; outline:none; transition:border .16s,box-shadow .16s; } textarea { min-height:84px; resize:vertical; } input:focus,textarea:focus { border-color:var(--brand); box-shadow:0 0 0 3px #38bdf820; }
+    .settings-groups { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }.settings-group { padding:17px; border:1px solid #263c57; border-radius:12px; background:#091a2d; }.settings-group.wide { grid-column:1/-1; }.settings-group h3 { margin:0; color:#edf7ff; font-size:14px; }.settings-group > p { margin:3px 0 15px; color:var(--muted); font-size:12px; }.settings-group .form-grid { gap:14px; }
+    .actions { display:flex; justify-content:flex-end; gap:10px; margin-top:20px; }.button { cursor:pointer; border:1px solid transparent; border-radius:9px; padding:10px 14px; color:white; background:var(--brand-strong); font-weight:750; transition:.17s; }.button:hover { background:#0369a1; transform:translateY(-1px); }.button.secondary { color:#c9d9ec; background:transparent; border-color:#314b68; }.button.warning { background:#b45309; }.button:disabled { cursor:wait; opacity:.65; transform:none; }
+    .status-grid { display:grid; grid-template-columns:1.35fr 1fr; gap:16px; }.signal { display:flex; align-items:center; gap:24px; }.signal-value { font-size:47px; font-weight:800; line-height:1; letter-spacing:-.06em; }.signal-unit { color:var(--muted); }.meter { display:flex; align-items:end; gap:5px; min-height:55px; }.meter span { width:9px; height:12px; border:1px solid #314764; border-radius:4px; background:#12243a; transition:.25s; }.meter span:nth-child(2){height:19px}.meter span:nth-child(3){height:27px}.meter span:nth-child(4){height:36px}.meter span:nth-child(5){height:45px}.meter span:nth-child(6){height:55px}.meter span.on { border-color:var(--brand); background:linear-gradient(#67e8f9,#0284c7); box-shadow:0 0 12px #38bdf877; }.info-list { display:grid; gap:12px; }.info-row { display:flex; justify-content:space-between; gap:12px; padding-bottom:10px; border-bottom:1px solid #20334b; }.info-row:last-child { padding-bottom:0; border:0; }.info-row span { color:var(--muted); }.info-row b { text-align:right; }
+    .notice { margin-top:15px; padding:12px 14px; color:#ffe5a2; background:#3c2c0c; border:1px solid #795518; border-radius:10px; font-size:12px; }.toast-zone { position:fixed; z-index:10; top:18px; right:18px; display:grid; gap:9px; width:min(360px,calc(100vw - 36px)); }.toast { padding:12px 14px; border:1px solid; border-radius:10px; background:#10253c; box-shadow:0 12px 35px #0007; animation:toast .25s ease; }.toast.success { border-color:#1b7d67; }.toast.error { border-color:#a93e55; }.toast.info { border-color:#256a94; } @keyframes toast { from {opacity:0; transform:translateY(-8px)} }
+    .radio-choice { display:flex; gap:10px; }.radio-choice label { flex:1; padding:11px; border:1px solid #2c435e; border-radius:9px; cursor:pointer; color:var(--muted); }.radio-choice input { width:auto; margin-right:7px; accent-color:var(--brand); }.radio-choice label:has(input:checked) { color:#e7fbff; border-color:var(--brand); background:#0b2d48; }
+    @media (max-width:900px) { .shell { grid-template-columns:1fr; }.sidebar { position:sticky; top:0; z-index:5; padding:12px 16px; flex-direction:row; align-items:center; gap:16px; }.sidebar .nav { display:flex; margin-left:auto; }.nav a { padding:8px; }.nav a span:not(.icon),.side-footer { display:none; }.brand { padding:0; }.cards { grid-template-columns:repeat(2,1fr); }.status-grid { grid-template-columns:1fr; } main { padding-top:24px; } }
+    @media (max-width:700px) { .settings-groups { grid-template-columns:1fr; }.settings-group.wide { grid-column:auto; } }
+    @media (max-width:560px) { .topbar { display:block; }.live-pill { display:inline-flex; margin-top:12px; }.form-grid,.cards { grid-template-columns:1fr; }.panel { padding:17px; }.radio-choice { display:grid; }.signal { align-items:flex-start; flex-direction:column; gap:15px; }.actions .button { flex:1; } }
+  </style>
 </head>
-<body class="bg-slate-900 text-white">
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand"><div class="brand-mark">✦</div><div><strong>STARS-105</strong><small>Alignment console</small></div></div>
+      <nav class="nav">
+        <a href="#dashboard" data-view="dashboard"><span class="icon">◉</span><span>Overview</span></a>
+        <a href="#radio" data-view="radio"><span class="icon">⌁</span><span>Radio & alignment</span></a>
+        <a href="#network" data-view="network"><span class="icon">⌘</span><span>Network</span></a>
+      </nav>
+      <div class="side-footer"><b>● System monitor</b><br>RSSI refreshes every 5 seconds.</div>
+    </aside>
+    <main>
+      <header class="topbar"><div><p class="eyebrow">Control workspace</p><h1 id="page-title">Alignment overview</h1><p class="muted" id="page-subtitle">Live signal and controller health.</p></div><div class="live-pill"><span class="dot" id="connection-dot"></span><span id="connection-label">Checking radio…</span></div></header>
+      <div id="toast-zone" class="toast-zone" aria-live="polite"></div>
 
-    <div class="flex min-h-screen">
-        <!-- Sidebar -->
-<aside class="w-64 bg-slate-800 p-6">
+      <section id="dashboard" class="view">
+        <div class="cards"><div class="card"><div class="card-label">Current RSSI</div><div class="card-value" id="card-rssi">—</div><div class="card-detail" id="card-rssi-detail">Waiting for radio</div></div><div class="card"><div class="card-label">Target RSSI</div><div class="card-value" id="card-target">—</div><div class="card-detail">Configured alignment target</div></div><div class="card"><div class="card-label">Frequency filters</div><div class="card-value" id="card-frequencies">—</div><div class="card-detail">Active candidates for sweep</div></div><div class="card"><div class="card-label">Controller uptime</div><div class="card-value" id="card-uptime">—</div><div class="card-detail" id="card-resources">CPU — · RAM —</div></div></div>
+        <div class="status-grid"><article class="panel"><div class="panel-header"><div><h2>Signal strength</h2><p class="muted">Live SNMP reading from the radio.</p></div><span class="badge" id="signal-state">Loading</span></div><div class="signal"><div><div class="signal-value" id="signal-value">—</div><div class="signal-unit">dBm</div></div><div class="meter" aria-label="Signal meter"><span></span><span></span><span></span><span></span><span></span><span></span></div></div></article><article class="panel"><div class="panel-header"><div><h2>Controller health</h2><p class="muted">Resources reported by the Raspberry Pi.</p></div></div><div class="info-list"><div class="info-row"><span>CPU usage</span><b id="health-cpu">—</b></div><div class="info-row"><span>Memory</span><b id="health-ram">—</b></div><div class="info-row"><span>Radio address</span><b id="health-radio">—</b></div></div></article></div>
+      </section>
 
-    <div class="flex items-center mb-8">
-    <svg class="w-16 h-16 mr-4 text-cyan-400" viewBox="0 0 100 100" fill="currentColor">
-        <!-- Orbit -->
-        <circle cx="50" cy="50" r="30" fill="none" stroke="currentColor" stroke-width="1" opacity="0.6"/>
-        
-        <!-- Satelit -->
-        <circle cx="70" cy="35" r="8" fill="currentColor"/>
-        <rect x="65" y="33" width="10" height="4" fill="currentColor"/>
-        <path d="M 67 40 L 67 45 M 73 40 L 73 45" stroke="currentColor" stroke-width="2"/>
-        
-        <!-- Antena ground -->
-        <path d="M 35 65 L 35 45 M 30 65 L 40 65" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
-        <circle cx="35" cy="40" r="3" fill="currentColor"/>
-        
-        <!-- Sinyal koneksi -->
-        <path d="M 40 45 L 60 40" stroke="currentColor" stroke-width="2" stroke-dasharray="3,2"/>
-    </svg>
-    <h1 class="text-2xl font-bold text-cyan-400">STARS-105</h1>
-</div>
+      <section id="radio" class="view">
+        <form id="radio-config-form" class="panel">
+          <div class="panel-header"><div><h2>Radio & alignment configuration</h2><p class="muted">Saving applies the new values and restarts the monitor and alignment services.</p></div><span class="badge">Stored in config.json</span></div>
+          <div class="settings-groups">
+            <section class="settings-group"><h3>Radio connection</h3><p>Address and SNMP read access for the radio.</p><div class="form-grid"><div class="field wide"><label for="IP_RADIO">Radio IP address</label><input id="IP_RADIO" type="text" required></div><div class="field"><label for="SNMP_PORT">SNMP port</label><input id="SNMP_PORT" type="number" min="1" max="65535" required></div><div class="field"><label for="SNMP_COMMUNITY">SNMP read community</label><input id="SNMP_COMMUNITY" type="text" required></div><div class="field wide"><label for="OID_RSSI">RSSI OID</label><input id="OID_RSSI" type="text" required></div></div></section>
+            <section class="settings-group"><h3>Filter write access</h3><p>Used when the controller enables or disables radio filter entries.</p><div class="form-grid"><div class="field wide"><label for="SNMP_WRITE_COMMUNITY">SNMP write community</label><input id="SNMP_WRITE_COMMUNITY" type="text" required><p class="hint">Required for every SNMP set operation.</p></div><div class="field wide"><label for="target_frequencies">Sweep target frequencies (Hz)</label><textarea id="target_frequencies" spellcheck="false" required aria-describedby="frequency-help"></textarea><p class="hint" id="frequency-help">Separate integer values with commas, spaces, or new lines. Example: 10507500.</p></div></div></section>
+            <section class="settings-group wide"><h3>Alignment behaviour</h3><p>Movement timing and retry limits for the automatic alignment cycle.</p><div class="form-grid"><div class="field"><label for="target_rssi">Target RSSI (dBm)</label><input id="target_rssi" type="number" required></div><div class="field"><label for="max_try">Maximum alignment retries</label><input id="max_try" type="number" min="1" max="3" required><p class="hint">Allowed range: 1–3.</p></div><div class="field"><label for="360_in_sec">Rotation time for 360° (seconds)</label><input id="360_in_sec" type="number" min="1" required></div><div class="field"><label for="degrees_per_step">Rotation increment (degrees)</label><input id="degrees_per_step" type="number" min="0.1" step="0.1" required></div><div class="field"><label for="settle_sec">Settle time per step (seconds)</label><input id="settle_sec" type="number" min="0" required></div><div class="field"><label for="iteration_actuator">Fine-tune iterations</label><input id="iteration_actuator" type="number" min="1" required></div><div class="field"><label for="actuator_speed">Actuator pulse (seconds)</label><input id="actuator_speed" type="number" min="0" step="0.1" required></div></div></section>
+          </div><div class="actions"><button class="button secondary" type="button" id="reset-radio">Reset form</button><button class="button" type="submit">Save & restart services</button></div>
+        </form>
+      </section>
 
-    <nav>
-        <ul class="space-y-2">
-            <li>
-                <a href="#radio" class="nav-link flex items-center p-3 rounded-lg text-slate-300 hover:bg-slate-700 transition-colors">
-                   
-                    <svg class="w-6 h-6 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"></path>
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 22V12h6v10"></path>
-                    </svg>
-                    Radio Settings
-                </a>
-            </li>
-            <li>
-                <a href="#network" class="nav-link flex items-center p-3 rounded-lg text-slate-300 hover:bg-slate-700 transition-colors">
-                   
-                    <svg class="w-6 h-6 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.111 16.404a5.5 5.5 0 017.778 0M12 20h.01m-7.08-7.071c3.904-3.905 10.236-3.905 14.141 0M1.394 9.393c5.857-5.857 15.355-5.857 21.213 0"></path>
-                    </svg>
-                    Network Settings
-                </a>
-            </li>
-            <li>
-                <a href="#status" class="nav-link flex items-center p-3 rounded-lg text-slate-300 hover:bg-slate-700 transition-colors">
-                    
-                    <svg class="w-6 h-6 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path>
-                    </svg>
-                    System Status
-                </a>
-            </li>
-        </ul>
-    </nav>
-
-    <!-- Footer Section -->
-    <div class="mt-auto pt-6 border-t border-slate-700">
-        <div class="text-center">
-            <p class="text-slate-400 text-sm font-semibold mb-1">STARS-105 Alignment System</p>
-            <p class="text-slate-500 text-xs">&copy; Starcom 2025</p>
-        </div>
-    </div>
-</aside>
-
-        <!-- Main Content -->
-        <main class="flex-1 p-10">
-            <!-- Alert Message Placeholder -->
-            <div id="alert-container" class="fixed top-5 right-5 z-50 w-96"></div>
-
-            <!-- Radio Settings Page -->
-            <div id="radio" class="content-section">
-                <h2 class="text-3xl font-bold mb-6">Radio Alignment Control</h2>
-                <form id="radio-config-form" class="space-y-6 max-w-6xl">
-                    <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
-                        <!-- Left Column -->
-                        <div class="space-y-6">
-                            <div>
-                                <label for="target_rssi" class="block text-sm font-medium text-slate-300">Target RSSI</label>
-                                <input id="target_rssi" type="number" class="mt-1 appearance-none block w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-md shadow-sm focus:outline-none focus:ring-cyan-500 focus:border-cyan-500">
-                            </div>
-                            <div>
-                                <label for="IP_RADIO" class="block text-sm font-medium text-slate-300">Radio IP Address</label>
-                                <input id="IP_RADIO" type="text" class="mt-1 appearance-none block w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-md shadow-sm focus:outline-none focus:ring-cyan-500 focus:border-cyan-500">
-                            </div>
-                            <div>
-                                <label for="SNMP_PORT" class="block text-sm font-medium text-slate-300">SNMP Port</label>
-                                <input id="SNMP_PORT" type="number" class="mt-1 appearance-none block w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-md shadow-sm focus:outline-none focus:ring-cyan-500 focus:border-cyan-500">
-                            </div>
-                            <div>
-                                <label for="SNMP_COMMUNITY" class="block text-sm font-medium text-slate-300">SNMP Community</label>
-                                <input id="SNMP_COMMUNITY" type="text" class="mt-1 appearance-none block w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-md shadow-sm focus:outline-none focus:ring-cyan-500 focus:border-cyan-500">
-                            </div>
-                        </div>
-                        
-                        <!-- Middle Column -->
-                        <div class="space-y-6">
-                            <div>
-                                <label for="OID_RSSI" class="block text-sm font-medium text-slate-300">SNMP OID for RSSI</label>
-                                <input id="OID_RSSI" type="text" class="mt-1 appearance-none block w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-md shadow-sm focus:outline-none focus:ring-cyan-500 focus:border-cyan-500">
-                            </div>
-                            <div>
-                                <label for="360_in_sec" class="block text-sm font-medium text-slate-300">Time for 360° (Seconds)</label>
-                                <input id="360_in_sec" type="number" class="mt-1 appearance-none block w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-md shadow-sm focus:outline-none focus:ring-cyan-500 focus:border-cyan-500">
-                            </div>
-                            <div>
-                                <label for="degrees_per_step" class="block text-sm font-medium text-slate-300">Degrees Per Step (Rotator)</label>
-                                <input id="degrees_per_step" type="number" step="0.1" class="mt-1 appearance-none block w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-md shadow-sm focus:outline-none focus:ring-cyan-500 focus:border-cyan-500">
-                            </div>
-                            <div>
-                                <label for="settle_sec" class="block text-sm font-medium text-slate-300">Hold Time Per Step (Seconds)</label>
-                                <input id="settle_sec" type="number" class="mt-1 appearance-none block w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-md shadow-sm focus:outline-none focus:ring-cyan-500 focus:border-cyan-500">
-                            </div>
-                        </div>
-                        
-                        <!-- Right Column -->
-                        <div class="space-y-6">
-                            <div>
-                                <label for="iteration_actuator" class="block text-sm font-medium text-slate-300">Actuator Iterations (Fine Tuning)</label>
-                                <input id="iteration_actuator" type="number" class="mt-1 appearance-none block w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-md shadow-sm focus:outline-none focus:ring-cyan-500 focus:border-cyan-500">
-                            </div>
-                            <div>
-                                <label for="actuator_speed" class="block text-sm font-medium text-slate-300">Actuator Speed (Seconds)</label>
-                                <input id="actuator_speed" type="number" step="0.1" class="mt-1 appearance-none block w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-md shadow-sm focus:outline-none focus:ring-cyan-500 focus:border-cyan-500">
-                            </div>
-                            <div>
-                                <label for="max_try" class="block text-sm font-medium text-slate-300">Auto Alignment Max Try</label>
-                                <input id="max_try" type="number" min="1" max="3" class="mt-1 appearance-none block w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-md shadow-sm focus:outline-none focus:ring-cyan-500 focus:border-cyan-500">
-                                <p class="mt-1 text-xs text-slate-500">Allowed values: 1-3</p>
-                            </div>
-                        </div>
-                    </div>
-                    <div>
-                        <button type="submit" class="w-full flex justify-center py-3 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-cyan-600 hover:bg-cyan-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-cyan-500 focus:ring-offset-slate-800">Save Radio Settings</button>
-                    </div>
-                </form>
-            </div>
-
-            <!-- Network Settings Page -->
-            <div id="network" class="content-section">
-                <h2 class="text-3xl font-bold mb-6">Network Configuration</h2>
-                <form id="network-config-form" class="space-y-6 max-w-xl">
-                    <fieldset>
-                        <legend class="block text-sm font-medium text-slate-300 mb-2">Method</legend>
-                        <div class="flex items-center space-x-4">
-                            <label><input type="radio" name="method" value="dhcp" class="form-radio h-4 w-4 text-cyan-600 bg-slate-700 border-slate-600 focus:ring-cyan-500"> <span class="ml-2">DHCP (Automatic)</span></label>
-                            <label><input type="radio" name="method" value="static" class="form-radio h-4 w-4 text-cyan-600 bg-slate-700 border-slate-600 focus:ring-cyan-500"> <span class="ml-2">Static</span></label>
-                        </div>
-                    </fieldset>
-                    <div id="static-fields" class="space-y-6">
-                        <div>
-                            <label for="ipaddress" class="block text-sm font-medium text-slate-300">IP Address</label>
-                            <input id="ipaddress" type="text" class="mt-1 appearance-none block w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-md shadow-sm focus:outline-none focus:ring-cyan-500 focus:border-cyan-500">
-                        </div>
-                        <div>
-                            <label for="subnet" class="block text-sm font-medium text-slate-300">Subnet Mask</label>
-                            <input id="subnet" type="text" class="mt-1 appearance-none block w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-md shadow-sm focus:outline-none focus:ring-cyan-500 focus:border-cyan-500">
-                        </div>
-                        <div>
-                            <label for="gateway" class="block text-sm font-medium text-slate-300">Gateway</label>
-                            <input id="gateway" type="text" class="mt-1 appearance-none block w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-md shadow-sm focus:outline-none focus:ring-cyan-500 focus:border-cyan-500">
-                        </div>
-                        <div>
-                            <label for="dns" class="block text-sm font-medium text-slate-300">DNS Server</label>
-                            <input id="dns" type="text" class="mt-1 appearance-none block w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-md shadow-sm focus:outline-none focus:ring-cyan-500 focus:border-cyan-500">
-                        </div>
-                    </div>
-                    <div class="!mt-8 p-4 rounded-md bg-amber-900/50 text-amber-300 border border-amber-700">
-                        <p class="font-bold">Warning!</p>
-                        <p class="text-sm">Applying network changes will restart the connection and you will be disconnected. You may need to refresh this page or browse to the new IP address.</p>
-                    </div>
-                    <div>
-                        <button type="submit" class="w-full flex justify-center py-3 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-amber-600 hover:bg-amber-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-amber-500 focus:ring-offset-slate-800">Apply Network Settings</button>
-                    </div>
-                </form>
-            </div>
-
-            <!-- system status Page -->
-<div id="status" class="content-section">
-    <h2 class="text-3xl font-bold mb-6">System Status</h2>
-    
-    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-        <!-- Alignment System Status Card -->
-        <div class="bg-slate-800 rounded-lg border border-slate-700 p-6">
-            <div class="flex justify-between items-start mb-4">
-                <h3 class="text-lg font-medium text-slate-300">Alignment System Status</h3>
-                <div id="alignment-status-indicator" class="status-indicator">
-                    <div class="w-3 h-3 rounded-full bg-green-500 animate-pulse"></div>
-                </div>
-            </div>
-            <div class="mt-2">
-                <p id="alignment-status-text" class="text-2xl font-bold text-white">ACTIVE</p>
-                <p id="alignment-status-desc" class="text-sm text-slate-400 mt-1">Last updated: 2 minutes ago</p>
-            </div>
-        </div>
-        
-       <!-- Signal Strength Card dengan LED dot menyala -->
-       <div class="bg-slate-800 rounded-lg border border-slate-700 p-6">
-           <div class="flex justify-between items-start mb-4">
-               <h3 class="text-lg font-medium text-slate-300">Signal Strength</h3>
-               <div id="rssi-status-indicator" class="status-indicator">
-                   <div class="w-3 h-3 rounded-full bg-amber-500"></div>
-               </div>
-           </div>
-           <div class="mt-2">
-               <p id="rssi-value" class="text-2xl font-bold text-white">-78 dBm</p>
-               <p id="rssi-status" class="text-sm text-slate-400 mt-1">Loading...</p>
-           </div>
-    <div class="mt-6">
-        <!-- Indikator LED Dot dengan glow effect -->
-        <div class="flex items-center justify-center space-x-2">
-            <!-- Signal Strength LEDs (will be updated by JavaScript) -->
-            <!-- LED 1: Red -->
-            <div class="signal-led w-4 h-4 rounded-full bg-slate-700 border border-slate-600"></div>
-            <!-- LED 2-5: Yellow -->
-            <div class="signal-led w-4 h-4 rounded-full bg-slate-700 border border-slate-600"></div>
-            <div class="signal-led w-4 h-4 rounded-full bg-slate-700 border border-slate-600"></div>
-            <div class="signal-led w-4 h-4 rounded-full bg-slate-700 border border-slate-600"></div>
-            <div class="signal-led w-4 h-4 rounded-full bg-slate-700 border border-slate-600"></div>
-            <!-- LED 6-9: Green -->
-            <div class="signal-led w-4 h-4 rounded-full bg-slate-700 border border-slate-600"></div>
-            <div class="signal-led w-4 h-4 rounded-full bg-slate-700 border border-slate-600"></div>
-            <div class="signal-led w-4 h-4 rounded-full bg-slate-700 border border-slate-600"></div>
-            <div class="signal-led w-4 h-4 rounded-full bg-slate-700 border border-slate-600"></div>
-        </div>
-        
-        <!-- Label indikator
-        <div class="flex justify-between text-xs text-slate-500 mt-2">
-            <span>Weak</span>
-            <span>Moderate</span>
-            <span>Strong</span>
-        </div>
-        -->
-    </div>
-</div>
-        
-    <!-- System Information Card -->
-<div class="bg-slate-800 rounded-lg border border-slate-700 p-6">
-    <div class="flex justify-between items-start mb-4">
-        <h3 class="text-lg font-medium text-slate-300">System Information</h3>
-        <div class="status-indicator">
-            <div class="w-3 h-3 rounded-full bg-green-500 animate-pulse"></div>
-        </div>
-    </div>
-    <div class="mt-2 space-y-4">
-        <div>
-            <p class="text-sm text-slate-400">System Uptime</p>
-            <p id="system-uptime-card" class="text-white">Loading...</p>
-        </div>
-        <div>
-            <p class="text-sm text-slate-400">CPU Usage</p>
-            <p id="cpu-usage" class="text-white">Loading...</p>
-        </div>
-        <div>
-            <p class="text-sm text-slate-400">RAM Usage</p>
-            <p id="ram-usage" class="text-white">Loading...</p>
-        </div>
-    </div>
-</div>
-        
-        <!-- Network Status Card -->
-        <div class="bg-slate-800 rounded-lg border border-slate-700 p-6">
-            <div class="flex justify-between items-start mb-4">
-                <h3 class="text-lg font-medium text-slate-300">Network Status</h3>
-                <div id="network-status-indicator" class="status-indicator">
-                    <div class="w-3 h-3 rounded-full bg-green-500 animate-pulse"></div>
-                </div>
-            </div>
-            <div class="mt-2">
-                <p id="network-status-text" class="text-2xl font-bold text-white">Online</p>
-                <p id="network-status-desc" class="text-sm text-slate-400 mt-1">Connected to network</p>
-            </div>
-            </div>
-        </div>
-    </div>
-</div>
-
-        </main>
-    </div>
-
-    <script>
-        document.addEventListener('DOMContentLoaded', () => {
-            const radioForm = document.getElementById('radio-config-form');
-            const networkForm = document.getElementById('network-config-form');
-            const alertContainer = document.getElementById('alert-container');
-            const staticFields = document.getElementById('static-fields');
-            
-            // Store references to LED elements when first found
-            let ledElements = [];
-            
-            // Find and store LED elements
-            const findAndStoreLedElements = () => {
-                if (ledElements.length === 0) {
-                    ledElements = Array.from(document.querySelectorAll('.signal-led'));
-                    console.log(`Stored ${ledElements.length} LED elements for future use`);
-                }
-                return ledElements;
-            };
-
-            // --- Navigation ---
-            const navLinks = document.querySelectorAll('.nav-link');
-            const contentSections = document.querySelectorAll('.content-section');
-            
-            function navigate() {
-                const hash = window.location.hash || '#radio';
-                contentSections.forEach(section => {
-                    section.classList.toggle('active', `#${section.id}` === hash);
-                });
-                navLinks.forEach(link => {
-                    link.classList.toggle('bg-slate-700', link.getAttribute('href') === hash);
-                });
-            }
-            window.addEventListener('hashchange', navigate);
-            navigate(); // Initial page load
-
-            // --- Alert Function ---
-            const showAlert = (message, type = 'success', duration = 3000) => {
-                const bgColor = type === 'success' ? 'bg-green-500' : (type === 'error' ? 'bg-red-500' : 'bg-blue-500');
-                const alertEl = document.createElement('div');
-                alertEl.className = `p-4 mb-4 text-sm text-white rounded-lg shadow-lg ${bgColor} alert-enter`;
-                alertEl.textContent = message;
-                alertContainer.appendChild(alertEl);
-                requestAnimationFrame(() => alertEl.classList.add('alert-enter-active'));
-                setTimeout(() => {
-                    alertEl.classList.remove('alert-enter-active');
-                    alertEl.classList.add('alert-exit-active');
-                    alertEl.addEventListener('transitionend', () => alertEl.remove());
-                }, duration);
-            };
-
-            // --- Radio Config ---
-            const loadRadioConfig = async () => {
-                try {
-                    const response = await fetch('/api/config');
-                    const config = await response.json();
-                    document.getElementById('target_rssi').value = config.target_rssi;
-                    document.getElementById('IP_RADIO').value = config.IP_RADIO;
-                    document.getElementById('SNMP_PORT').value = config.SNMP_PORT;
-                    document.getElementById('SNMP_COMMUNITY').value = config.SNMP_COMMUNITY;
-                    document.getElementById('OID_RSSI').value = config.OID_RSSI;
-                    document.getElementById('degrees_per_step').value = config.degrees_per_step;
-                    document.getElementById('settle_sec').value = config.settle_sec;
-                    document.getElementById('iteration_actuator').value = config.iteration_actuator;
-                    document.getElementById('actuator_speed').value = config.actuator_speed;
-                    document.getElementById('max_try').value = config.max_try;
-                    document.getElementById('360_in_sec').value = config['360_in_sec'];
-                } catch (error) { showAlert('Could not load radio config.', 'error'); }
-            };
-            radioForm.addEventListener('submit', async (e) => {
-                e.preventDefault();
-                
-                // Validate max_try value
-                const maxTryValue = parseInt(document.getElementById('max_try').value, 10);
-                if (isNaN(maxTryValue) || maxTryValue < 1 || maxTryValue > 3) {
-                    showAlert('Auto Alignment Max Try must be a value between 1 and 3', 'error');
-                    return;
-                }
-                
-                const configData = {
-                    target_rssi: parseFloat(document.getElementById('target_rssi').value),
-                    IP_RADIO: document.getElementById('IP_RADIO').value,
-                    SNMP_PORT: parseInt(document.getElementById('SNMP_PORT').value, 10),
-                    SNMP_COMMUNITY: document.getElementById('SNMP_COMMUNITY').value,
-                    OID_RSSI: document.getElementById('OID_RSSI').value,
-                    degrees_per_step: parseFloat(document.getElementById('degrees_per_step').value),
-                    settle_sec: parseInt(document.getElementById('settle_sec').value, 10),
-                    iteration_actuator: parseInt(document.getElementById('iteration_actuator').value, 10),
-                    actuator_speed: parseFloat(document.getElementById('actuator_speed').value),
-                    max_try: maxTryValue,
-                    '360_in_sec': parseInt(document.getElementById('360_in_sec').value, 10)
-                };
-                try {
-                    const response = await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(configData) });
-                    const result = await response.json();
-                    showAlert(result.message, response.ok ? 'success' : 'error');
-                } catch (error) { showAlert(`Error: ${error.message}`, 'error'); }
-            });
-
-            // --- Network Config ---
-            const loadNetworkConfig = async () => {
-                try {
-                    const response = await fetch('/api/network');
-                    const config = await response.json();
-                    if (!response.ok) throw new Error(config.message);
-                    
-                    document.querySelector(`input[name="method"][value="${config.method}"]`).checked = true;
-                    document.getElementById('ipaddress').value = config.ipaddress;
-                    document.getElementById('subnet').value = config.subnet;
-                    document.getElementById('gateway').value = config.gateway;
-                    document.getElementById('dns').value = config.dns;
-                    toggleStaticFields();
-                } catch (error) { showAlert(`Could not load network config: ${error.message}`, 'error'); }
-            };
-            
-            const toggleStaticFields = () => {
-                const isStatic = document.querySelector('input[name="method"]:checked').value === 'static';
-                staticFields.style.display = isStatic ? 'block' : 'none';
-            };
-            document.querySelectorAll('input[name="method"]').forEach(radio => radio.addEventListener('change', toggleStaticFields));
-
-            networkForm.addEventListener('submit', async (e) => {
-                e.preventDefault();
-                const method = document.querySelector('input[name="method"]:checked').value;
-                const configData = {
-                    method: method,
-                    ipaddress: document.getElementById('ipaddress').value,
-                    subnet: document.getElementById('subnet').value,
-                    gateway: document.getElementById('gateway').value,
-                    dns: document.getElementById('dns').value,
-                };
-                
-                showAlert('Applying network settings... you will be disconnected.', 'info', 10000);
-
-                try {
-                    // This fetch will likely fail or time out because the server is restarting its network. This is expected.
-                    await fetch('/api/network', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(configData) });
-                } catch (error) {
-                    // We expect an error here, so we don't need to show another alert.
-                    console.log("Fetch failed as expected due to network restart.");
-                }
-            });
-
-            // --- System Status ---
-            const loadSystemStatus = async () => {
-                try {
-                    const response = await fetch('/api/system');
-                    const systemData = await response.json();
-                    document.getElementById('system-uptime-card').textContent = systemData.uptime;
-                    document.getElementById('cpu-usage').textContent = systemData.cpu_usage || 'N/A';
-                    document.getElementById('ram-usage').textContent = systemData.ram_usage || 'N/A';
-                } catch (error) {
-                    console.error('Could not load system status:', error);
-                    document.getElementById('system-uptime-card').textContent = 'Error loading uptime';
-                    document.getElementById('cpu-usage').textContent = 'Error';
-                    document.getElementById('ram-usage').textContent = 'Error';
-                }
-            };
-
-            // --- RSSI Status ---
-            const loadRssiStatus = async () => {
-                try {
-                    const response = await fetch('/api/rssi');
-                    const rssiData = await response.json();
-                    
-                    const rssiValueElement = document.getElementById('rssi-value');
-                    const rssiStatusElement = document.getElementById('rssi-status');
-                    const rssiStatusIndicator = document.getElementById('rssi-status-indicator');
-                    
-                    if (rssiData.status === 'success' && rssiData.rssi !== null) {
-                        rssiValueElement.textContent = `${rssiData.rssi} ${rssiData.unit}`;
-                        rssiStatusElement.textContent = 'Last updated: just now';
-                        
-                        // Update LED indicator based on which LEDs are lit
-                        const rssi = rssiData.rssi;
-                        let indicatorColor = 'bg-red-500'; // Default to red
-                        let shouldPulse = false;
-                        let isOnline = true; // Default to online
-                        
-                        // Special case: RSSI = -1 means not connected
-                        if (rssi === -1) {
-                            indicatorColor = 'bg-red-500';
-                            shouldPulse = false;
-                            isOnline = false;
-                        } else if (rssi >= -75) {
-                            // Green LEDs are on (RSSI >= -75)
-                            indicatorColor = 'bg-green-500';
-                            shouldPulse = true;
-                            isOnline = true;
-                        } else if (rssi >= -93) {
-                            // Yellow LEDs are on (RSSI between -93 and -76)
-                            indicatorColor = 'bg-amber-500';
-                            shouldPulse = true;
-                            isOnline = true;
-                        } else if (rssi === -94) {
-                            // Only red LED is on
-                            indicatorColor = 'bg-red-500';
-                            shouldPulse = false;
-                            isOnline = true;
-                        }
-                        
-                        // Update the status indicator color
-                        const indicatorDot = rssiStatusIndicator.querySelector('div');
-                        if (shouldPulse) {
-                            indicatorDot.className = `w-3 h-3 rounded-full ${indicatorColor} animate-pulse`;
-                        } else {
-                            indicatorDot.className = `w-3 h-3 rounded-full ${indicatorColor}`;
-                        }
-                        
-                        // Update LED dots visualization with a direct approach
-                        updateLedsDirectly(rssiData.rssi);
-                        
-                        // Update Network Status based on connection
-                        updateNetworkStatus(isOnline);
-                        
-                        // Update Alignment System Status to ACTIVE
-                        updateAlignmentStatus(true);
-                    } else {
-                        rssiValueElement.textContent = 'No Signal';
-                        rssiStatusElement.textContent = rssiData.message || 'Error reading signal';
-                        
-                        // Set indicator to error state (red, no pulse)
-                        const indicatorDot = rssiStatusIndicator.querySelector('div');
-                        indicatorDot.className = 'w-3 h-3 rounded-full bg-red-500';
-                        
-                        // Turn off all LEDs when there's no signal
-                        updateLedsDirectly(null);
-                        
-                        // Update Network Status to Offline
-                        updateNetworkStatus(false);
-                        
-                        // Update Alignment System Status to NON-ACTIVE
-                        updateAlignmentStatus(false);
-                    }
-                } catch (error) {
-                    console.error('Could not load RSSI status:', error);
-                    document.getElementById('rssi-value').textContent = 'Error';
-                    document.getElementById('rssi-status').textContent = 'Failed to fetch signal data';
-                    
-                    // Set indicator to error state (red, no pulse)
-                    const indicatorDot = document.getElementById('rssi-status-indicator').querySelector('div');
-                    indicatorDot.className = 'w-3 h-3 rounded-full bg-red-500';
-                    
-                    // Turn off all LEDs when there's an error
-                    updateLedsDirectly(null);
-                    
-                    // Update Network Status to Offline
-                    updateNetworkStatus(false);
-                    
-                    // Update Alignment System Status to NON-ACTIVE
-                    updateAlignmentStatus(false);
-                }
-            };
-
-            // Update LED dots based on RSSI value - direct DOM manipulation
-            const updateLedsDirectly = (rssi) => {
-                // Try to use stored LED elements first
-                let leds = findAndStoreLedElements();
-                
-                // If no stored LEDs, try to find them in the entire document
-                if (leds.length === 0) {
-                    const foundLeds = document.querySelectorAll('.signal-led');
-                    if (foundLeds.length > 0) {
-                        leds = Array.from(foundLeds);
-                        ledElements = leds; // Store them for future use
-                        console.log(`Found and stored ${leds.length} LED elements`);
-                    }
-                }
-                
-                // If still no LEDs found, try to find them in the status section specifically
-                if (leds.length === 0) {
-                    const statusSection = document.getElementById('status');
-                    if (statusSection) {
-                        const statusLeds = statusSection.querySelectorAll('.signal-led');
-                        if (statusLeds.length > 0) {
-                            leds = Array.from(statusLeds);
-                            ledElements = leds; // Store them for future use
-                            console.log(`Found and stored ${leds.length} LED elements in status section`);
-                        }
-                    }
-                }
-                
-                // If still no LEDs found, try a more aggressive search
-                if (leds.length === 0) {
-                    // Search for all div elements with the signal-led class pattern
-                    const allDivs = document.getElementsByTagName('div');
-                    for (let i = 0; i < allDivs.length; i++) {
-                        if (allDivs[i].className && allDivs[i].className.includes('signal-led')) {
-                            console.log(`Found LED element by class pattern search`);
-                            leds = [allDivs[i]];
-                            ledElements = leds; // Store them for future use
-                            break;
-                        }
-                    }
-                }
-                
-                if (leds.length === 0) {
-                    console.log('No LED elements found anywhere');
-                    return;
-                }
-                
-                updateLedsInContainer(leds, rssi);
-            };
-            
-            // Helper function to update LEDs in a specific container
-            const updateLedsInContainer = (leds, rssi) => {
-                
-                // First, turn off all LEDs
-                leds.forEach((led, index) => {
-                    led.className = 'w-4 h-4 rounded-full bg-slate-700 border border-slate-600';
-                });
-                
-                // Handle null or undefined RSSI (error case)
-                if (rssi === null || rssi === undefined) {
-                    console.log('RSSI is null/undefined, all LEDs off');
-                    return;
-                }
-                
-                // Special case: RSSI = -1 means not connected
-                if (rssi === -1) {
-                    console.log('RSSI is -1 (not connected), all LEDs off');
-                    return;
-                }
-                
-                // Determine which LEDs to turn on based on RSSI value
-                let ledsToTurnOn = [];
-                
-                if (rssi === -94) {
-                    ledsToTurnOn = [0];  // LED 1 (red)
-                } else if (rssi >= -93 && rssi <= -82) {
-                    ledsToTurnOn = [0, 1];  // LED 1-2 (red, yellow)
-                } else if (rssi >= -81 && rssi <= -80) {
-                    ledsToTurnOn = [0, 1, 2];  // LED 1-3 (red, yellow, yellow)
-                } else if (rssi >= -79 && rssi <= -78) {
-                    ledsToTurnOn = [0, 1, 2, 3];  // LED 1-4 (red, yellow, yellow, yellow)
-                } else if (rssi >= -77 && rssi <= -76) {
-                    ledsToTurnOn = [0, 1, 2, 3, 4];  // LED 1-5 (red, yellow, yellow, yellow, yellow)
-                } else if (rssi >= -75 && rssi <= -74) {
-                    ledsToTurnOn = [0, 1, 2, 3, 4, 5];  // LED 1-6 (red, yellow, yellow, yellow, yellow, green)
-                } else if (rssi >= -73 && rssi <= -72) {
-                    ledsToTurnOn = [0, 1, 2, 3, 4, 5, 6];  // LED 1-7 (red, yellow, yellow, yellow, yellow, green, green)
-                } else if (rssi >= -71 && rssi <= -70) {
-                    ledsToTurnOn = [0, 1, 2, 3, 4, 5, 6, 7];  // LED 1-8 (red, yellow, yellow, yellow, yellow, green, green, green)
-                } else if (rssi >= -69 && rssi < -1) {
-                    ledsToTurnOn = [0, 1, 2, 3, 4, 5, 6, 7, 8];  // LED 1-9 (all LEDs)
-                }
-                
-                // Turn on the specified LEDs
-                ledsToTurnOn.forEach(index => {
-                    if (index < leds.length) {
-                        if (index === 0) {
-                            // LED 1: Red
-                            leds[index].className = 'w-4 h-4 rounded-full bg-red-500 shadow-lg shadow-red-500/50';
-                        } else if (index >= 1 && index <= 4) {
-                            // LED 2-5: Yellow
-                            leds[index].className = 'w-4 h-4 rounded-full bg-amber-500 shadow-lg shadow-amber-500/50';
-                        } else if (index >= 5 && index <= 8) {
-                            // LED 6-9: Green
-                            leds[index].className = 'w-4 h-4 rounded-full bg-green-500 shadow-lg shadow-green-500/50';
-                        }
-                    }
-                });
-                
-                // Log for debugging
-                console.log(`RSSI: ${rssi}, LEDs on: ${ledsToTurnOn.length}, LED indices: [${ledsToTurnOn.join(', ')}]`);
-            };
-            
-            // Update Network Status based on signal availability
-            const updateNetworkStatus = (isOnline) => {
-                const networkStatusIndicator = document.getElementById('network-status-indicator');
-                const networkStatusText = document.getElementById('network-status-text');
-                const networkStatusDesc = document.getElementById('network-status-desc');
-                
-                if (isOnline) {
-                    // Set to Online
-                    networkStatusText.textContent = 'Online';
-                    networkStatusDesc.textContent = 'Connected to network';
-                    const indicatorDot = networkStatusIndicator.querySelector('div');
-                    indicatorDot.className = 'w-3 h-3 rounded-full bg-green-500 animate-pulse';
-                } else {
-                    // Set to Offline
-                    networkStatusText.textContent = 'Offline';
-                    networkStatusDesc.textContent = 'No signal connection';
-                    const indicatorDot = networkStatusIndicator.querySelector('div');
-                    indicatorDot.className = 'w-3 h-3 rounded-full bg-red-500';
-                }
-            };
-            
-            // Update Alignment System Status based on RSSI retrieval
-            const updateAlignmentStatus = (isActive) => {
-                const alignmentStatusIndicator = document.getElementById('alignment-status-indicator');
-                const alignmentStatusText = document.getElementById('alignment-status-text');
-                const alignmentStatusDesc = document.getElementById('alignment-status-desc');
-                
-                if (isActive) {
-                    // Set to ACTIVE
-                    alignmentStatusText.textContent = 'ACTIVE';
-                    alignmentStatusDesc.textContent = 'System operational';
-                    const indicatorDot = alignmentStatusIndicator.querySelector('div');
-                    indicatorDot.className = 'w-3 h-3 rounded-full bg-green-500 animate-pulse';
-                } else {
-                    // Set to NON-ACTIVE
-                    alignmentStatusText.textContent = 'NON-ACTIVE';
-                    alignmentStatusDesc.textContent = 'System not operational';
-                    const indicatorDot = alignmentStatusIndicator.querySelector('div');
-                    indicatorDot.className = 'w-3 h-3 rounded-full bg-red-500';
-                }
-            };
-
-            // --- Initial Load ---
-            loadRadioConfig();
-            loadNetworkConfig();
-            loadSystemStatus();
-            
-            // Initialize LED elements
-            findAndStoreLedElements();
-            
-            // Load RSSI status after initializing LEDs
-            loadRssiStatus();
-            
-            // Refresh system status every 5 seconds
-            setInterval(loadSystemStatus, 5000);
-            
-            // Refresh RSSI status every 5 seconds
-            setInterval(loadRssiStatus, 5000);
-        });
-    </script>
+      <section id="network" class="view"><form id="network-config-form" class="panel"><div class="panel-header"><div><h2>Network configuration</h2><p class="muted">Configure the active Raspberry Pi connection.</p></div><span class="badge">nmcli</span></div><div class="form-grid"><div class="field wide"><label>Address assignment</label><div class="radio-choice"><label><input type="radio" name="method" value="dhcp">DHCP · automatic</label><label><input type="radio" name="method" value="static">Static address</label></div></div><div id="static-fields" class="form-grid field wide"><div class="field"><label for="ipaddress">IP address</label><input id="ipaddress" type="text"></div><div class="field"><label for="subnet">Subnet mask</label><input id="subnet" type="text"></div><div class="field"><label for="gateway">Gateway</label><input id="gateway" type="text"></div><div class="field"><label for="dns">DNS server</label><input id="dns" type="text"></div></div></div><div class="notice">Applying network settings may disconnect this page. Reopen the console using the device’s new address if necessary.</div><div class="actions"><button class="button warning" type="submit">Apply network settings</button></div></form></section>
+    </main>
+  </div>
+  <script>
+    document.addEventListener('DOMContentLoaded', () => {
+      const titles = { dashboard:['Alignment overview','Live signal and controller health.'], radio:['Radio & alignment','Configure scan candidates and actuator behaviour.'], network:['Network','Manage the Raspberry Pi active connection.'] };
+      let loadedConfig = null;
+      const byId = id => document.getElementById(id);
+      const toast = (message, type='info') => { const item=document.createElement('div'); item.className=`toast ${type}`; item.textContent=message; byId('toast-zone').append(item); setTimeout(()=>item.remove(),4200); };
+      const parseFrequencies = raw => { const tokens=raw.trim().split(/[\s,;]+/).filter(Boolean); if (!tokens.length) throw new Error('Enter at least one target frequency.'); const values=tokens.map(token => { if (!/^\d+$/.test(token)) throw new Error(`Frequency must be a whole number in Hz: ${token}`); const number=Number(token); if (!Number.isSafeInteger(number) || number <= 0) throw new Error(`Invalid frequency: ${token}`); return number; }); return [...new Set(values)].sort((a,b)=>a-b); };
+      const setView = () => { const view=(location.hash || '#dashboard').slice(1); const selected=titles[view] ? view : 'dashboard'; document.querySelectorAll('.view').forEach(el=>el.classList.toggle('active',el.id===selected)); document.querySelectorAll('.nav a').forEach(el=>el.classList.toggle('active',el.dataset.view===selected)); byId('page-title').textContent=titles[selected][0]; byId('page-subtitle').textContent=titles[selected][1]; };
+      addEventListener('hashchange',setView); setView();
+      const updateConfigForm = config => { ['target_rssi','IP_RADIO','SNMP_PORT','SNMP_COMMUNITY','SNMP_WRITE_COMMUNITY','OID_RSSI','degrees_per_step','settle_sec','iteration_actuator','actuator_speed','max_try','360_in_sec'].forEach(key => byId(key).value=config[key] ?? ''); byId('target_frequencies').value=(config.target_frequencies_hz || []).join(', '); };
+      const loadConfig = async () => { try { const response=await fetch('/api/config'); if(!response.ok) throw new Error('Could not load configuration.'); loadedConfig=await response.json(); updateConfigForm(loadedConfig); byId('card-target').textContent=`${loadedConfig.target_rssi} dBm`; byId('card-frequencies').textContent=`${loadedConfig.target_frequencies_hz.length} active`; byId('health-radio').textContent=loadedConfig.IP_RADIO; } catch(error) { toast(error.message,'error'); } };
+      const updateRssi = async () => { try { const response=await fetch('/api/rssi'); const data=await response.json(); const online=response.ok && data.status==='success' && data.rssi !== null && data.rssi !== -1; const value=online ? data.rssi : null; byId('connection-dot').classList.toggle('off',!online); byId('connection-label').textContent=online ? 'Radio online' : 'Radio unavailable'; byId('card-rssi').textContent=value === null ? '—' : `${value} dBm`; byId('card-rssi-detail').textContent=online ? 'Updated just now' : (data.message || 'No signal'); byId('signal-value').textContent=value === null ? '—' : value; byId('signal-state').textContent=online ? (value >= -75 ? 'Strong signal' : 'Signal detected') : 'No signal'; const active=value === null ? 0 : Math.max(1,Math.min(6,Math.floor((value + 95) / 4) + 1)); document.querySelectorAll('.meter span').forEach((bar,index)=>bar.classList.toggle('on',index<active)); } catch { byId('connection-dot').classList.add('off'); byId('connection-label').textContent='Radio unavailable'; byId('signal-state').textContent='Unavailable'; } };
+      const updateSystem = async () => { try { const response=await fetch('/api/system'); const data=await response.json(); byId('card-uptime').textContent=data.uptime || '—'; byId('card-resources').textContent=`CPU ${data.cpu_usage || '—'} · RAM ${data.ram_usage || '—'}`; byId('health-cpu').textContent=data.cpu_usage || '—'; byId('health-ram').textContent=data.ram_usage || '—'; } catch { /* Keep the last successful value visible. */ } };
+      byId('reset-radio').addEventListener('click',()=>loadedConfig && updateConfigForm(loadedConfig));
+      byId('radio-config-form').addEventListener('submit',async event => { event.preventDefault(); let frequencies; try { frequencies=parseFrequencies(byId('target_frequencies').value); } catch(error) { toast(error.message,'error'); return; } const maxTry=Number(byId('max_try').value); if (!Number.isInteger(maxTry) || maxTry<1 || maxTry>3) { toast('Maximum alignment retries must be between 1 and 3.','error'); return; } const data={ target_rssi:Number(byId('target_rssi').value), IP_RADIO:byId('IP_RADIO').value.trim(), SNMP_PORT:Number(byId('SNMP_PORT').value), SNMP_COMMUNITY:byId('SNMP_COMMUNITY').value.trim(), SNMP_WRITE_COMMUNITY:byId('SNMP_WRITE_COMMUNITY').value.trim(), OID_RSSI:byId('OID_RSSI').value.trim(), degrees_per_step:Number(byId('degrees_per_step').value), settle_sec:Number(byId('settle_sec').value), iteration_actuator:Number(byId('iteration_actuator').value), actuator_speed:Number(byId('actuator_speed').value), max_try:maxTry, '360_in_sec':Number(byId('360_in_sec').value), target_frequencies_hz:frequencies }; const button=event.submitter; button.disabled=true; try { const response=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)}); const result=await response.json(); if(!response.ok) throw new Error(result.message || 'Could not save configuration.'); loadedConfig=data; updateConfigForm(data); byId('card-target').textContent=`${data.target_rssi} dBm`; byId('card-frequencies').textContent=`${frequencies.length} active`; toast(result.message,'success'); } catch(error) { toast(error.message,'error'); } finally { button.disabled=false; } });
+      const toggleStaticFields = () => byId('static-fields').style.display=document.querySelector('input[name="method"]:checked').value==='static' ? 'grid' : 'none';
+      document.querySelectorAll('input[name="method"]').forEach(input=>input.addEventListener('change',toggleStaticFields));
+      const loadNetwork = async () => { try { const response=await fetch('/api/network'); const data=await response.json(); if(!response.ok) throw new Error(data.message); document.querySelector(`input[name="method"][value="${data.method}"]`).checked=true; ['ipaddress','subnet','gateway','dns'].forEach(key=>byId(key).value=data[key]||''); toggleStaticFields(); } catch(error) { toast(`Network: ${error.message}`,'error'); } };
+      byId('network-config-form').addEventListener('submit',async event=>{ event.preventDefault(); const data={method:document.querySelector('input[name="method"]:checked').value,ipaddress:byId('ipaddress').value.trim(),subnet:byId('subnet').value.trim(),gateway:byId('gateway').value.trim(),dns:byId('dns').value.trim()}; toast('Applying network settings. The connection may briefly disconnect.','info'); try { await fetch('/api/network',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)}); } catch { /* Network restart can interrupt this request. */ } });
+      loadConfig(); loadNetwork(); updateRssi(); updateSystem(); setInterval(updateRssi,5000); setInterval(updateSystem,5000);
+    });
+  </script>
 </body>
 </html>

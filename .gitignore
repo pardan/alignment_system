@@ -1,2 +1,5 @@
 RUN_THIS.bat
 service.bat
+__pycache__/
+*.py[cod]
+alignment_system.zip

@@ -23,13 +23,22 @@ DEFAULTS = {
     "IP_RADIO": "172.20.25.6",
     "SNMP_PORT": 161,
     "SNMP_COMMUNITY": "public",
+    "SNMP_WRITE_COMMUNITY": "public",
     "OID_RSSI": "1.3.6.1.4.1.1807.113.2.11.1.2.1.1",
     "degrees_per_step": 5,
     "settle_sec": 2,
     "iteration_actuator": 3,
     "actuator_speed": 0.5,
     "max_try": 1,
-    "360_in_sec": 68
+    "360_in_sec": 68,
+    "target_frequencies_hz": [
+        10507500,
+        10514500,
+        10521500,
+        10528500,
+        10535500,
+        10542500
+    ]
 }
 
 def load_config(path=CONFIG_FILE):
@@ -56,10 +65,11 @@ settle_sec         = cfg["settle_sec"]
 iteration_actuator = cfg["iteration_actuator"]
 actuator_speed     = cfg["actuator_speed"]
 max_try            = cfg["max_try"]
+target_frequencies_hz = cfg["target_frequencies_hz"]
 # SNMP Filter Configuration
 snmp_filter_host           = cfg["IP_RADIO"]
 snmp_filter_community      = cfg["SNMP_COMMUNITY"]
-snmp_filter_set_community  = "public"
+snmp_filter_set_community  = cfg["SNMP_WRITE_COMMUNITY"]
 snmp_filter_oid            = "1.3.6.1.4.1.1807.113.1.1.1.3"
 snmp_filter_set_oid_base   = "1.3.6.1.4.1.1807.113.1.1.1.4"
 
@@ -678,7 +688,7 @@ def run_once():
 
     # ---- Get SNMP entries with specific values ----
     print("\nGetting SNMP entries with specific values...")
-    target_values = [10507500, 10514500, 10521500, 10528500, 10535500, 10542500]
+    target_values = target_frequencies_hz
     snmp_entries = get_entries_with_specific_values(
         snmp_filter_host,
         snmp_filter_community,

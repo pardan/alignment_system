@@ -15,13 +15,22 @@ DEFAULT_CONFIG = {
     "IP_RADIO": "172.20.25.5",
     "SNMP_PORT": 161,
     "SNMP_COMMUNITY": "public",
+    "SNMP_WRITE_COMMUNITY": "public",
     "OID_RSSI": "1.3.6.1.4.1.1807.113.2.11.1.2.1.1",
     "degrees_per_step": 6.0,
     "settle_sec": 5,
     "iteration_actuator": 3,
     "actuator_speed": 0.5,
     "max_try": 1,
-    "360_in_sec": 68
+    "360_in_sec": 68,
+    "target_frequencies_hz": [
+        10507500,
+        10514500,
+        10521500,
+        10528500,
+        10535500,
+        10542500
+    ]
 }
 
 # --- Helper Functions ---
@@ -90,6 +99,25 @@ def save_config(new_config):
     except IOError:
         return False
 
+def normalize_target_frequencies(values):
+    """Validate target frequencies in Hz and return a sorted unique list."""
+    if not isinstance(values, list) or not values:
+        raise ValueError("At least one target frequency is required.")
+
+    frequencies = []
+    for value in values:
+        if isinstance(value, bool):
+            raise ValueError("Each target frequency must be a whole number in Hz.")
+        try:
+            frequency = int(value)
+        except (TypeError, ValueError):
+            raise ValueError("Each target frequency must be a whole number in Hz.")
+        if frequency <= 0:
+            raise ValueError("Each target frequency must be greater than zero.")
+        frequencies.append(frequency)
+
+    return sorted(set(frequencies))
+
 def get_active_connection():
     """Finds the name of the active network connection."""
     output = run_command("nmcli -t -f NAME,TYPE connection show --active")
@@ -140,7 +168,7 @@ def api_config():
     
     if request.method == 'POST':
         data = request.json
-        if not all(k in data for k in DEFAULT_CONFIG.keys()):
+        if not isinstance(data, dict) or not all(k in data for k in DEFAULT_CONFIG.keys()):
             return jsonify({"status": "error", "message": "Missing radio config keys."}), 400
         
         # Validate max_try value
@@ -151,6 +179,13 @@ def api_config():
                     return jsonify({"status": "error", "message": "Auto Alignment Max Try must be a value between 1 and 3"}), 400
             except (ValueError, TypeError):
                 return jsonify({"status": "error", "message": "Auto Alignment Max Try must be a valid integer between 1 and 3"}), 400
+
+        try:
+            data["target_frequencies_hz"] = normalize_target_frequencies(
+                data["target_frequencies_hz"]
+            )
+        except ValueError as error:
+            return jsonify({"status": "error", "message": str(error)}), 400
         
         if save_config(data):
             # Reload and restart the service after saving the new config
