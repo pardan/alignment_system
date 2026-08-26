@@ -20,15 +20,15 @@ from snmp_filter_integration import (
 CONFIG_FILE = 'config.json'
 DEFAULTS = {
     "target_rssi": -80,
-    "IP_RADIO": "172.20.25.5",
+    "IP_RADIO": "172.20.25.6",
     "SNMP_PORT": 161,
     "SNMP_COMMUNITY": "public",
     "OID_RSSI": "1.3.6.1.4.1.1807.113.2.11.1.2.1.1",
-    "degrees_per_step": 6.0,
-    "settle_sec": 5,
+    "degrees_per_step": 5,
+    "settle_sec": 2,
     "iteration_actuator": 3,
-    "actuator_speed" : 0.5,
-    "max_try" : 1,
+    "actuator_speed": 0.5,
+    "max_try": 1,
     "360_in_sec": 68
 }
 
@@ -802,6 +802,7 @@ def run_once():
             print(f"[no_best attempt {no_best_tries}/2]")
             if no_best_tries > max_try - 1:
                 print("Reached 'no_best' trying attempts. Stopping.")
+                cleanup_and_abort()
                 break
             time.sleep(1)
             # Check for abort signal during the sleep
