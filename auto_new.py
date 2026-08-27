@@ -5,6 +5,7 @@ import subprocess
 import signal
 import gpiod
 from threading import Thread, Event
+from alignment_scheduler import AutoAlignmentScheduler
 from snmp_filter_integration import (
     get_non_zero_entries,
     get_entries_with_specific_values,
@@ -31,6 +32,11 @@ DEFAULTS = {
     "actuator_speed": 0.5,
     "max_try": 1,
     "360_in_sec": 68,
+    "AUTO_BOOT_RSSI_MINUS_ONE_COUNT": 5,
+    "AUTO_SIGNAL_LOSS_RSSI_THRESHOLD": -90,
+    "AUTO_SIGNAL_LOSS_DURATION_SEC": 60,
+    "AUTO_RESCAN_COOLDOWN_SEC": 300,
+    "AUTO_RESCAN_MAX_ATTEMPTS": None,
     "target_frequencies_hz": [
         10507500,
         10514500,
@@ -66,6 +72,11 @@ iteration_actuator = cfg["iteration_actuator"]
 actuator_speed     = cfg["actuator_speed"]
 max_try            = cfg["max_try"]
 target_frequencies_hz = cfg["target_frequencies_hz"]
+auto_boot_rssi_minus_one_count = cfg["AUTO_BOOT_RSSI_MINUS_ONE_COUNT"]
+auto_signal_loss_rssi_threshold = cfg["AUTO_SIGNAL_LOSS_RSSI_THRESHOLD"]
+auto_signal_loss_duration_sec = cfg["AUTO_SIGNAL_LOSS_DURATION_SEC"]
+auto_rescan_cooldown_sec = cfg["AUTO_RESCAN_COOLDOWN_SEC"]
+auto_rescan_max_attempts = cfg["AUTO_RESCAN_MAX_ATTEMPTS"]
 # SNMP Filter Configuration
 snmp_filter_host           = cfg["IP_RADIO"]
 snmp_filter_community      = cfg["SNMP_COMMUNITY"]
@@ -139,6 +150,7 @@ def read(line):
 # =========================
 latest_rssi   = None
 last_rssi_time = 0  # Timestamp of last valid RSSI reading
+rssi_sample_count = 0  # Monotonic count: scheduler processes each SNMP sample only once
 stop_rssi     = Event()  # stop RSSI worker
 led_process   = None     # subprocess for led_sequence.py
 
@@ -148,6 +160,7 @@ run_once_active = False  # Track if run_once is currently running
 manual_direction = None  # Track current manual direction ('up' or 'down')
 abort_button_pressed_time = 0  # Track when abort button (GPIO19) was first pressed (legacy)
 run_once_was_aborted = False  # Track if run_once was aborted to prevent auto-restart
+manual_request_ignored_logged = False
 
 # =========================
 # RSSI monitoring
@@ -167,12 +180,13 @@ def get_rssi(ip, port, oid, community):
         return None
 
 def rssi_worker():
-    global latest_rssi, last_rssi_time
+    global latest_rssi, last_rssi_time, rssi_sample_count
     while not stop_rssi.is_set():
         r = get_rssi(IP_RADIO, port, OID_RSSI, community)
         if r is not None:
             latest_rssi = r
             last_rssi_time = time.time()
+            rssi_sample_count += 1
             #print(f"Current RSSI: {r} dBm")
         
         # Adjust sleep time based on button press and run state
@@ -630,6 +644,7 @@ def stop_led_sequence():
 # =========================
 def check_rssi_connection():
     """Check if RSSI connection is active, return True if OK, False if lost"""
+    record_manual_request_during_alignment()
     current_time = time.time()
     if latest_rssi is None or (current_time - last_rssi_time) > 5:  # No RSSI update for 5 seconds
         if latest_rssi is None:
@@ -639,52 +654,66 @@ def check_rssi_connection():
         return False
     return True
 
-def cleanup_and_abort():
-    """Common cleanup sequence when connection is lost"""
+def rssi_is_fresh():
+    """A fresh RSSI can be -1; an unavailable SNMP reading is represented by None/stale."""
+    return latest_rssi is not None and (time.time() - last_rssi_time) <= 5
+
+def is_rssi_signal_lost(rssi):
+    """Keep scan outcomes consistent with the scheduler loss rule."""
+    return rssi is not None and (
+        rssi == -1 or rssi < auto_signal_loss_rssi_threshold
+    )
+
+def record_manual_request_during_alignment():
+    """Keep the Start button observable during a blocking alignment without queuing scans."""
+    global manual_request_ignored_logged
+    if run_once_active and button_is_pressed() and not manual_request_ignored_logged:
+        print("[SCHEDULER] manual request ignored: alignment in progress")
+        manual_request_ignored_logged = True
+
+def finalize_alignment(outcome, restore_filters=False):
+    """Leave the hardware and LED/monitor services in a safe, known state."""
     global run_once_active, run_once_was_aborted
-    run_once_active = False  # Reset the flag when aborting
-    run_once_was_aborted = True  # Set flag to prevent auto-restart
+    run_once_active = False
+    run_once_was_aborted = outcome == "aborted"
     all_low()
     stop_led_sequence()
-    
-    # Re-enable all non-zero SNMP entries during abort
-    print("\n[ABORT] Re-enabling all non-zero SNMP entries...")
-    all_non_zero_entries = get_non_zero_entries(
-        snmp_filter_host,
-        snmp_filter_community,
-        snmp_filter_oid,
-        port,
-        max_entries=None  # Get all non-zero entries
-    )
-    
-    if all_non_zero_entries:
-        print(f"[ABORT] Enabling {len(all_non_zero_entries)} non-zero SNMP entries...")
-        for _, _, last_digit in all_non_zero_entries:
-            enable_oid = f"{snmp_filter_set_oid_base}.{last_digit}"
-            run_snmpset(snmp_filter_host, snmp_filter_set_community, enable_oid, '1', 'i', port, verbose=False)
-        print("[ABORT] All non-zero SNMP entries re-enabled")
-    else:
-        print("[ABORT] No non-zero SNMP entries found to re-enable")
-    
+    if restore_filters:
+        print("\n[ALIGNMENT] Re-enabling all non-zero SNMP entries...")
+        all_non_zero_entries = get_non_zero_entries(
+            snmp_filter_host, snmp_filter_community, snmp_filter_oid, port, max_entries=None
+        )
+        if all_non_zero_entries:
+            for _, _, last_digit in all_non_zero_entries:
+                enable_oid = f"{snmp_filter_set_oid_base}.{last_digit}"
+                run_snmpset(snmp_filter_host, snmp_filter_set_community, enable_oid, '1', 'i', port, verbose=False)
+            print("[ALIGNMENT] All non-zero SNMP entries re-enabled")
     start_monitor_service()
+    return outcome
 
-def run_once():
-    global latest_rssi, run_once_active, abort_button_pressed_time, run_once_was_aborted
+def cleanup_and_abort():
+    """Compatibility wrapper for physical abort paths."""
+    return finalize_alignment("aborted", restore_filters=True)
+
+def run_once(reason):
+    global latest_rssi, run_once_active, abort_button_pressed_time, run_once_was_aborted, manual_request_ignored_logged
     start = time.time()
+    started_with_signal_lost = is_rssi_signal_lost(latest_rssi)
     
     # Set flag to indicate run_once is active
     run_once_active = True
     abort_button_pressed_time = 0  # Reset abort button timer
     run_once_was_aborted = False  # Reset abort flag at start of new run
+    manual_request_ignored_logged = False
     
+    print(f"[ALIGNMENT] Starting scan: reason={reason}")
     # Stop monitor service and start LED sequence at the beginning of each run
     stop_monitor_service()
     start_led_sequence()
 
     # Check if RSSI is available and connection is active
     if not check_rssi_connection():
-        cleanup_and_abort()
-        return False  # Indicate failure
+        return finalize_alignment("rssi_unavailable", restore_filters=True)
 
     # ---- Get SNMP entries with specific values ----
     print("\nGetting SNMP entries with specific values...")
@@ -743,12 +772,10 @@ def run_once():
         # Check for abort signal (GPIO6 active LOW)
         if abort_is_active():
             print("[ABORT] GPIO6 is LOW - aborting calibration!")
-            cleanup_and_abort()
-            return False
+            return cleanup_and_abort()
         
         if not check_rssi_connection():
-            cleanup_and_abort()
-            return False
+            return finalize_alignment("rssi_unavailable", restore_filters=True)
         time.sleep(0.1)
     
     print("Calibration finished (startpoint set).")
@@ -770,13 +797,11 @@ def run_once():
         # Check for abort signal (GPIO6 active LOW)
         if abort_is_active():
             print("[ABORT] GPIO6 is LOW - aborting serpentine scan!")
-            cleanup_and_abort()
-            return False
+            return cleanup_and_abort()
         
         # Check RSSI connection before each sweep
         if not check_rssi_connection():
-            cleanup_and_abort()
-            return False
+            return finalize_alignment("rssi_unavailable", restore_filters=True)
              
         if direction == "RIGHT":
             result = sweep_steps(line_main, line_alt, "RIGHT", start, snmp_entries)
@@ -785,13 +810,11 @@ def run_once():
 
         # Check RSSI connection after sweep
         if not check_rssi_connection() or result.get("status") == "connection_lost":
-            cleanup_and_abort()
-            return False
+            return finalize_alignment("rssi_unavailable", restore_filters=True)
         
         # Check if sweep was aborted
         if result.get("status") == "aborted":
-            cleanup_and_abort()
-            return False
+            return cleanup_and_abort()
 
         if result.get("status") in ("target", "best_found"):
             time.sleep(1)
@@ -799,112 +822,110 @@ def run_once():
             # Check for abort signal before vertical refine
             if abort_is_active():
                 print("[ABORT] GPIO6 is LOW - aborting before vertical refine!")
-                cleanup_and_abort()
-                return False
+                return cleanup_and_abort()
 
-            if not check_rssi_connection() or not vertical_refine(iterations=iteration_actuator, bump_sec=actuator_speed, settle=settle_sec):
-                cleanup_and_abort()
-                return False
-            break
+            if not check_rssi_connection():
+                return finalize_alignment("rssi_unavailable", restore_filters=True)
+            if not vertical_refine(iterations=iteration_actuator, bump_sec=actuator_speed, settle=settle_sec):
+                return cleanup_and_abort() if abort_is_active() else finalize_alignment("failed", restore_filters=True)
+            if started_with_signal_lost and not is_rssi_signal_lost(latest_rssi):
+                outcome = "signal_recovered"
+            else:
+                outcome = "target_reached" if result.get("status") == "target" else "best_position_found"
+            return finalize_alignment(outcome)
 
         if result.get("status") == "no_best":
             no_best_tries += 1
             print(f"[no_best attempt {no_best_tries}/2]")
             if no_best_tries > max_try - 1:
                 print("Reached 'no_best' trying attempts. Stopping.")
-                cleanup_and_abort()
-                break
+                outcome = "signal_still_lost" if latest_rssi == -1 else "failed"
+                return finalize_alignment(outcome, restore_filters=True)
             time.sleep(1)
             # Check for abort signal during the sleep
             if abort_is_active():
                 print("[ABORT] GPIO6 is LOW - aborting during no_best retry!")
-                cleanup_and_abort()
-                return False
+                return cleanup_and_abort()
                 
             bump_up(actuator_speed)
             direction = "LEFT" if direction == "RIGHT" else "RIGHT"
 
-    # Run completed - stop LED sequence and restart monitor service
-    stop_led_sequence()
-    start_monitor_service()
-    
-    # # Enable all SNMP entries after run is complete
-    # if snmp_entries is not None:
-    #     print("\nEnabling all SNMP entries after run completion...")
-    #     for _, _, last_digit in snmp_entries:
-    #         enable_oid = f"{snmp_filter_set_oid_base}.{last_digit}"
-    #         run_snmpset(snmp_filter_host, snmp_filter_set_community, enable_oid, '1', 'i', port, verbose=False)
-    #     print("All SNMP entries enabled after run completion")
-    
-    # Clear flag to indicate run_once is no longer active
-    run_once_active = False
-    
-    print("Run complete.\n")
+    return finalize_alignment("failed", restore_filters=True)
 
 # =========================
-# Main loop: wait for button, run
+# Main loop: scheduler owns every invocation of run_once.
 # =========================
 try:
-    print("Ready. Monitoring RSSI and button press...")
+    print("Ready. Monitoring RSSI, scheduler, and button press...")
     
     # Start RSSI monitoring thread
     stop_rssi.clear()
     rssi_thread = Thread(target=rssi_worker, daemon=True)
     rssi_thread.start()
     
-    rssi_was_minus_one = False  # Track if RSSI was -1 to avoid repeated triggers
-    button_pressed_before = False  # Track if button has been pressed at least once
-    
+    scheduler = AutoAlignmentScheduler(
+        auto_boot_rssi_minus_one_count,
+        auto_signal_loss_duration_sec,
+        auto_rescan_cooldown_sec,
+        auto_rescan_max_attempts,
+        auto_signal_loss_rssi_threshold
+    )
+    previous_state = scheduler.state
+    last_scheduler_sample_count = -1
+
+    def run_scheduled_scan(reason):
+        """Run exactly one alignment request and feed its outcome back to the scheduler."""
+        print(f"[SCHEDULER] scan requested: reason={reason}")
+        all_low()
+        outcome = run_once(reason)
+        is_fresh = rssi_is_fresh()
+        entered_cooldown = scheduler.complete_scan(outcome, latest_rssi, is_fresh, time.time())
+        if entered_cooldown:
+            print(
+                f"[SCHEDULER] outcome={outcome}; cooldown until "
+                f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(scheduler.cooldown_until))}"
+            )
+        else:
+            print(f"[SCHEDULER] outcome={outcome}; state={scheduler.state}")
+
     while True:
         # Check manual buttons first (highest priority)
         check_manual_buttons()
         
-        # Check for button press (existing functionality)
+        now = time.time()
+        automatic_reason = None
+        if rssi_sample_count != last_scheduler_sample_count:
+            last_scheduler_sample_count = rssi_sample_count
+            automatic_reason = scheduler.observe_rssi(latest_rssi, rssi_is_fresh(), now)
+        if automatic_reason:
+            run_scheduled_scan(automatic_reason)
+            previous_state = scheduler.state
+            continue
+
+        if scheduler.state != previous_state:
+            if scheduler.state == scheduler.COOLDOWN:
+                print("[SCHEDULER] automatic trigger held: cooldown active")
+            else:
+                print(f"[SCHEDULER] state changed: {previous_state} -> {scheduler.state}")
+            previous_state = scheduler.state
+
+        # A manual request may bypass cooldown, but never run alongside an alignment.
         if button_is_pressed():
             # Debounce: wait for stable low ~20ms
             time.sleep(0.02)
             if not button_is_pressed():
                 continue
             print("[BUTTON] Start pressed.")
-            button_pressed_before = True  # Mark that button has been pressed at least once
-            
-            # Reset GPIO state before each run
-            all_low()
-            
-            # Execute one full run
-            success = run_once()
-            
-            # Only force outputs LOW if run was successful
-            if success is not False:
-                all_low()
+            manual_reason = scheduler.request_manual_scan()
+            if manual_reason:
+                run_scheduled_scan(manual_reason)
+            else:
+                print("[SCHEDULER] manual request ignored: alignment in progress or waiting for RSSI")
             
             # Wait for button release
             while button_is_pressed():
                 time.sleep(0.02)
         
-        # # Check RSSI for -1 value (only after button has been pressed at least once)
-        # if button_pressed_before and latest_rssi is not None and latest_rssi == -1:
-        #     if not rssi_was_minus_one:  # Only trigger once when RSSI first becomes -1
-        #         # Don't auto-restart if run_once was aborted
-        #         if not run_once_was_aborted:
-        #             print("[RSSI] RSSI is -1, triggering sequence...")
-        #             rssi_was_minus_one = True
-                    
-        #             # Execute the required sequence
-        #             all_low()
-        #             success = run_once()
-        #             if success is not False:
-        #                 all_low()
-        #         else:
-        #             print("[RSSI] RSSI is -1 but run_once was aborted, skipping auto-restart")
-        # else:
-        #     # Reset the flag when RSSI is no longer -1
-        #     rssi_was_minus_one = False
-        #     # Reset abort flag when RSSI is no longer -1 (allowing future auto-restarts)
-        #     if run_once_was_aborted and latest_rssi != -1:
-        #         run_once_was_aborted = False
-        #         print("[RSSI] RSSI recovered, clearing abort flag")
-            
         time.sleep(0.02)
 
 except KeyboardInterrupt:

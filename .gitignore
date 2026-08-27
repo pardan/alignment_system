@@ -3,3 +3,6 @@ service.bat
 __pycache__/
 *.py[cod]
 alignment_system.zip
+*docx
+*.md
+*.pptx

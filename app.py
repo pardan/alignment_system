@@ -23,6 +23,11 @@ DEFAULT_CONFIG = {
     "actuator_speed": 0.5,
     "max_try": 1,
     "360_in_sec": 68,
+    "AUTO_BOOT_RSSI_MINUS_ONE_COUNT": 5,
+    "AUTO_SIGNAL_LOSS_RSSI_THRESHOLD": -90,
+    "AUTO_SIGNAL_LOSS_DURATION_SEC": 60,
+    "AUTO_RESCAN_COOLDOWN_SEC": 300,
+    "AUTO_RESCAN_MAX_ATTEMPTS": None,
     "target_frequencies_hz": [
         10507500,
         10514500,
@@ -118,6 +123,32 @@ def normalize_target_frequencies(values):
 
     return sorted(set(frequencies))
 
+def normalize_positive_integer(value, field_name, allow_null=False):
+    """Return a positive integer, accepting null only for unlimited retries."""
+    if allow_null and value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"{field_name} must be a positive whole number.")
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{field_name} must be a positive whole number.")
+    if normalized <= 0:
+        raise ValueError(f"{field_name} must be greater than zero.")
+    return normalized
+
+def normalize_rssi_loss_threshold(value):
+    """Validate the RSSI threshold used alongside the -1 loss sentinel."""
+    if isinstance(value, bool):
+        raise ValueError("Signal-loss RSSI threshold must be a negative whole number.")
+    try:
+        threshold = int(value)
+    except (TypeError, ValueError):
+        raise ValueError("Signal-loss RSSI threshold must be a negative whole number.")
+    if threshold >= 0:
+        raise ValueError("Signal-loss RSSI threshold must be below zero.")
+    return threshold
+
 def get_active_connection():
     """Finds the name of the active network connection."""
     output = run_command("nmcli -t -f NAME,TYPE connection show --active")
@@ -183,6 +214,21 @@ def api_config():
         try:
             data["target_frequencies_hz"] = normalize_target_frequencies(
                 data["target_frequencies_hz"]
+            )
+            data["AUTO_BOOT_RSSI_MINUS_ONE_COUNT"] = normalize_positive_integer(
+                data["AUTO_BOOT_RSSI_MINUS_ONE_COUNT"], "Boot RSSI -1 count"
+            )
+            data["AUTO_SIGNAL_LOSS_RSSI_THRESHOLD"] = normalize_rssi_loss_threshold(
+                data["AUTO_SIGNAL_LOSS_RSSI_THRESHOLD"]
+            )
+            data["AUTO_SIGNAL_LOSS_DURATION_SEC"] = normalize_positive_integer(
+                data["AUTO_SIGNAL_LOSS_DURATION_SEC"], "Signal-loss duration"
+            )
+            data["AUTO_RESCAN_COOLDOWN_SEC"] = normalize_positive_integer(
+                data["AUTO_RESCAN_COOLDOWN_SEC"], "Rescan cooldown"
+            )
+            data["AUTO_RESCAN_MAX_ATTEMPTS"] = normalize_positive_integer(
+                data["AUTO_RESCAN_MAX_ATTEMPTS"], "Automatic rescan maximum attempts", allow_null=True
             )
         except ValueError as error:
             return jsonify({"status": "error", "message": str(error)}), 400
