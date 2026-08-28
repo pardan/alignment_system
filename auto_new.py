@@ -21,6 +21,8 @@ from snmp_filter_integration import (
 CONFIG_FILE = 'config.json'
 DEFAULTS = {
     "target_rssi": -80,
+    "USE_TARGET_RSSI": True,
+    "RSSI_WORSENING_TOLERANCE_DB": 3,
     "IP_RADIO": "172.20.25.6",
     "SNMP_PORT": 161,
     "SNMP_COMMUNITY": "public",
@@ -62,6 +64,8 @@ def load_config(path=CONFIG_FILE):
 
 cfg = load_config()
 target_rssi        = cfg["target_rssi"]
+use_target_rssi    = cfg["USE_TARGET_RSSI"]
+rssi_worsening_tolerance_db = cfg["RSSI_WORSENING_TOLERANCE_DB"]
 IP_RADIO           = cfg["IP_RADIO"]
 OID_RSSI           = cfg["OID_RSSI"]
 community          = cfg["SNMP_COMMUNITY"]
@@ -401,7 +405,7 @@ def format_duration(sec):
 # =========================
 def sweep_steps(move_line, reverse_line, name, start_time, snmp_entries=None):
     """
-    Horizontal sweep of H_STEPS steps; stop early if target reached.
+    Horizontal sweep of H_STEPS steps; stop early if target reached when enabled.
     Track best RSSI and best SNMP entry, return to it using reverse_line.
     
     Args:
@@ -439,6 +443,7 @@ def sweep_steps(move_line, reverse_line, name, start_time, snmp_entries=None):
         
         if r is None or r == -1:
             print(f"[{i+1}/{H_STEPS} {name}] RSSI invalid (-1), skipping...")
+            # -1 is SNMP's no-signal sentinel, not an inferior valid reading.
             continue
 
         print(f"[{i+1}/{H_STEPS} {name}] RSSI: {r} dBm" +
@@ -449,12 +454,41 @@ def sweep_steps(move_line, reverse_line, name, start_time, snmp_entries=None):
             if entries_tested and current_entry is not None:
                 best_entry = current_entry
 
-        if r >= target_rssi:
+        if use_target_rssi and r >= target_rssi:
             dur = time.time() - start_time
             print(f"Target RSSI {target_rssi} dBm reached at step #{i+1} ({r} dBm)")
             print(f"Total Time: {format_duration(dur)}")
             return {
                 "status": "target",
+                "best_entry": best_entry
+            }
+
+        if (
+            not use_target_rssi
+            and best_idx >= 0
+            and r < best_rssi - rssi_worsening_tolerance_db
+        ):
+            steps_back = i - best_idx
+            print(
+                f"RSSI {r} dBm is worse than best {best_rssi} dBm by more than "
+                f"{rssi_worsening_tolerance_db} dB; returning {steps_back} step(s) "
+                "to the best position for fine tune."
+            )
+            if steps_back > 0:
+                pulse(reverse_line, gpio_step_sec * steps_back)
+            if best_entry is not None and snmp_entries is not None:
+                enable_best_entry(
+                    snmp_filter_host,
+                    snmp_filter_set_community,
+                    snmp_filter_set_oid_base,
+                    best_entry,
+                    snmp_entries,
+                    port
+                )
+            return {
+                "status": "best_found",
+                "best_rssi": best_rssi,
+                "best_index": best_idx,
                 "best_entry": best_entry
             }
 

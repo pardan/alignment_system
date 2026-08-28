@@ -12,6 +12,8 @@ CONFIG_FILE = 'config.json'
 # --- Default Configuration (with new SNMP fields) ---
 DEFAULT_CONFIG = {
     "target_rssi": -80,
+    "USE_TARGET_RSSI": True,
+    "RSSI_WORSENING_TOLERANCE_DB": 3,
     "IP_RADIO": "172.20.25.5",
     "SNMP_PORT": 161,
     "SNMP_COMMUNITY": "public",
@@ -137,6 +139,18 @@ def normalize_positive_integer(value, field_name, allow_null=False):
         raise ValueError(f"{field_name} must be greater than zero.")
     return normalized
 
+def normalize_non_negative_integer(value, field_name):
+    """Return an integer threshold that may be zero."""
+    if isinstance(value, bool):
+        raise ValueError(f"{field_name} must be a whole number of zero or more.")
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{field_name} must be a whole number of zero or more.")
+    if normalized < 0:
+        raise ValueError(f"{field_name} must be zero or more.")
+    return normalized
+
 def normalize_rssi_loss_threshold(value):
     """Validate the RSSI threshold used alongside the -1 loss sentinel."""
     if isinstance(value, bool):
@@ -148,6 +162,12 @@ def normalize_rssi_loss_threshold(value):
     if threshold >= 0:
         raise ValueError("Signal-loss RSSI threshold must be below zero.")
     return threshold
+
+def normalize_boolean(value, field_name):
+    """Accept only JSON booleans for explicit controller mode switches."""
+    if not isinstance(value, bool):
+        raise ValueError(f"{field_name} must be true or false.")
+    return value
 
 def get_active_connection():
     """Finds the name of the active network connection."""
@@ -214,6 +234,12 @@ def api_config():
         try:
             data["target_frequencies_hz"] = normalize_target_frequencies(
                 data["target_frequencies_hz"]
+            )
+            data["USE_TARGET_RSSI"] = normalize_boolean(
+                data["USE_TARGET_RSSI"], "Use target RSSI"
+            )
+            data["RSSI_WORSENING_TOLERANCE_DB"] = normalize_non_negative_integer(
+                data["RSSI_WORSENING_TOLERANCE_DB"], "RSSI worsening tolerance"
             )
             data["AUTO_BOOT_RSSI_MINUS_ONE_COUNT"] = normalize_positive_integer(
                 data["AUTO_BOOT_RSSI_MINUS_ONE_COUNT"], "Boot RSSI -1 count"
