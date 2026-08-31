@@ -6,6 +6,15 @@ import signal
 import gpiod
 from threading import Thread, Event
 from alignment_scheduler import AutoAlignmentScheduler
+from multi_alignment import (
+    PeerApiClient,
+    consume_commands,
+    determine_local_ip,
+    determine_role,
+    is_success_outcome,
+    new_session_id,
+    publish_status,
+)
 from snmp_filter_integration import (
     get_non_zero_entries,
     get_entries_with_specific_values,
@@ -39,6 +48,9 @@ DEFAULTS = {
     "AUTO_SIGNAL_LOSS_DURATION_SEC": 60,
     "AUTO_RESCAN_COOLDOWN_SEC": 300,
     "AUTO_RESCAN_MAX_ATTEMPTS": None,
+    "ALIGNMENT_MODE": "single",
+    "PEER_ALIGNMENT_IP": "",
+    "MULTI_ALIGNMENT_API_TOKEN": "",
     "target_frequencies_hz": [
         10507500,
         10514500,
@@ -81,6 +93,9 @@ auto_signal_loss_rssi_threshold = cfg["AUTO_SIGNAL_LOSS_RSSI_THRESHOLD"]
 auto_signal_loss_duration_sec = cfg["AUTO_SIGNAL_LOSS_DURATION_SEC"]
 auto_rescan_cooldown_sec = cfg["AUTO_RESCAN_COOLDOWN_SEC"]
 auto_rescan_max_attempts = cfg["AUTO_RESCAN_MAX_ATTEMPTS"]
+alignment_mode = cfg["ALIGNMENT_MODE"]
+peer_alignment_ip = cfg["PEER_ALIGNMENT_IP"]
+multi_alignment_api_token = cfg["MULTI_ALIGNMENT_API_TOKEN"]
 # SNMP Filter Configuration
 snmp_filter_host           = cfg["IP_RADIO"]
 snmp_filter_community      = cfg["SNMP_COMMUNITY"]
@@ -165,6 +180,86 @@ manual_direction = None  # Track current manual direction ('up' or 'down')
 abort_button_pressed_time = 0  # Track when abort button (GPIO19) was first pressed (legacy)
 run_once_was_aborted = False  # Track if run_once was aborted to prevent auto-restart
 manual_request_ignored_logged = False
+
+# Multi-alignment state.  The Flask process only appends commands to the local
+# spool.  This process is the sole owner of GPIO and session state.
+multi_local_ip = None
+multi_role = None
+peer_client = None
+active_session_id = None
+pending_peer_result = None
+last_scan_outcome = None
+last_scan_success = None
+peer_last_error = None
+completed_session_ids = set()
+
+
+def multi_enabled():
+    return alignment_mode == "multi"
+
+
+def configure_multi_alignment():
+    """Resolve role only within the configured two-controller pair."""
+    global multi_local_ip, multi_role, peer_client, peer_last_error
+    if not multi_enabled():
+        return
+    try:
+        multi_local_ip = determine_local_ip(peer_alignment_ip)
+        multi_role = determine_role(multi_local_ip, peer_alignment_ip)
+        peer_client = PeerApiClient(peer_alignment_ip, multi_alignment_api_token)
+        print(
+            f"[MULTI] enabled: local={multi_local_ip} peer={peer_alignment_ip} "
+            f"role={multi_role}"
+        )
+    except (ValueError, OSError) as error:
+        peer_last_error = str(error)
+        print(f"[MULTI] unavailable: {error}")
+
+
+def multi_status_snapshot(scheduler):
+    fresh = rssi_is_fresh()
+    return {
+        "alignment_mode": alignment_mode,
+        "local_ip": multi_local_ip,
+        "peer_ip": peer_alignment_ip if multi_enabled() else None,
+        "role": multi_role,
+        "rssi": latest_rssi,
+        "rssi_fresh": fresh,
+        "signal_lost": is_rssi_signal_lost(latest_rssi) if fresh else None,
+        "scheduler_state": scheduler.state,
+        "active_session_id": active_session_id,
+        "last_scan_outcome": last_scan_outcome,
+        "last_scan_success": last_scan_success,
+        "peer_assisted_hold": scheduler.state == scheduler.PEER_ASSISTED_HOLD,
+        "ready_for_joint_scan": (
+            fresh and is_rssi_signal_lost(latest_rssi)
+            and joint_eligibility_ready
+            and not run_once_active
+            and scheduler.state not in (scheduler.ALIGNING, scheduler.SESSION_WAITING_PEER)
+        ),
+        "peer_last_error": peer_last_error,
+    }
+
+
+def publish_multi_status(scheduler):
+    publish_status(multi_status_snapshot(scheduler))
+
+
+def peer_is_eligible(status):
+    return bool(
+        status.get("rssi_fresh")
+        and status.get("signal_lost")
+        and status.get("ready_for_joint_scan")
+        and status.get("alignment_mode") == "multi"
+    )
+
+
+def send_peer_command(command, session_id, result=None):
+    """Use a distinct id for retriable, idempotent peer commands."""
+    if peer_client is None:
+        raise RuntimeError("Peer client is unavailable.")
+    command_id = f"{session_id}-{command}-{int(time.time() * 1000)}"
+    return peer_client.command(command, session_id, command_id, result=result)
 
 # =========================
 # RSSI monitoring
@@ -465,12 +560,14 @@ def sweep_steps(move_line, reverse_line, name, start_time, snmp_entries=None):
 
         if (
             not use_target_rssi
+            and best_rssi >= target_rssi
             and best_idx >= 0
             and r < best_rssi - rssi_worsening_tolerance_db
         ):
             steps_back = i - best_idx
             print(
-                f"RSSI {r} dBm is worse than best {best_rssi} dBm by more than "
+                f"RSSI target {target_rssi} dBm has been reached. RSSI {r} dBm is "
+                f"worse than best {best_rssi} dBm by more than "
                 f"{rssi_worsening_tolerance_db} dB; returning {steps_back} step(s) "
                 "to the best position for fine tune."
             )
@@ -896,6 +993,9 @@ try:
     stop_rssi.clear()
     rssi_thread = Thread(target=rssi_worker, daemon=True)
     rssi_thread.start()
+    configure_multi_alignment()
+    multi_role_retry_interval_sec = 5
+    next_multi_role_retry_at = time.time() + multi_role_retry_interval_sec
     
     scheduler = AutoAlignmentScheduler(
         auto_boot_rssi_minus_one_count,
@@ -906,12 +1006,17 @@ try:
     )
     previous_state = scheduler.state
     last_scheduler_sample_count = -1
+    nonlocal_pending_joint = {"session_id": None, "reason": None}
+    joint_eligibility_ready = False
 
-    def run_scheduled_scan(reason):
-        """Run exactly one alignment request and feed its outcome back to the scheduler."""
+    def run_single_scan(reason):
+        """Existing single-controller behavior, retained unchanged by default."""
+        global last_scan_outcome, last_scan_success
         print(f"[SCHEDULER] scan requested: reason={reason}")
         all_low()
         outcome = run_once(reason)
+        last_scan_outcome = outcome
+        last_scan_success = is_success_outcome(outcome)
         is_fresh = rssi_is_fresh()
         entered_cooldown = scheduler.complete_scan(outcome, latest_rssi, is_fresh, time.time())
         if entered_cooldown:
@@ -922,15 +1027,192 @@ try:
         else:
             print(f"[SCHEDULER] outcome={outcome}; state={scheduler.state}")
 
+    def run_joint_local_scan(session_id, reason):
+        """Perform the local scan for one already-authorized joint session."""
+        global last_scan_outcome, last_scan_success
+        scheduler.begin_joint_scan(reason)
+        publish_multi_status(scheduler)
+        all_low()
+        outcome = run_once(reason)
+        last_scan_outcome = outcome
+        last_scan_success = is_success_outcome(outcome)
+        publish_multi_status(scheduler)
+        return outcome, last_scan_success
+
+    def defer_joint_scan(session_id, reason):
+        """Run a peer-authorized scan after the main loop returns from command handling."""
+        nonlocal_pending_joint["session_id"] = session_id
+        nonlocal_pending_joint["reason"] = reason
+
+    def coordinator_start_joint_scan(reason, require_peer_loss=True):
+        """Authorize exactly one joint scan after verifying both paired units."""
+        global active_session_id, peer_last_error, joint_eligibility_ready
+        if peer_client is None or multi_role != "coordinator":
+            return False
+        try:
+            peer_status = peer_client.status()
+        except RuntimeError as error:
+            peer_last_error = str(error)
+            print(f"[MULTI] peer unavailable; holding automatic scan: {error}")
+            publish_multi_status(scheduler)
+            return False
+        if require_peer_loss and not peer_is_eligible(peer_status):
+            print("[MULTI] peer is not eligible for joint scan; holding automatic scan")
+            publish_multi_status(scheduler)
+            return False
+        if not require_peer_loss and not (
+            peer_status.get("alignment_mode") == "multi"
+            and not peer_status.get("active_session_id")
+            and peer_status.get("scheduler_state") not in (
+                scheduler.ALIGNING, scheduler.SESSION_WAITING_PEER
+            )
+        ):
+            print("[MULTI] peer is busy or unavailable for manual joint scan")
+            publish_multi_status(scheduler)
+            return False
+        if not scheduler.begin_joint_wait(reason):
+            return False
+        joint_eligibility_ready = False
+        active_session_id = new_session_id()
+        publish_multi_status(scheduler)
+        try:
+            send_peer_command("start_joint_scan", active_session_id)
+        except RuntimeError as error:
+            peer_last_error = str(error)
+            scheduler.state = scheduler.IDLE
+            active_session_id = None
+            print(f"[MULTI] could not start peer scan: {error}")
+            publish_multi_status(scheduler)
+            return False
+        outcome, success = run_joint_local_scan(active_session_id, f"joint_{reason}")
+        try:
+            send_peer_command(
+                "joint_scan_result", active_session_id,
+                {"outcome": outcome, "success": success},
+            )
+        except RuntimeError as error:
+            peer_last_error = str(error)
+            print(f"[MULTI] local result could not be reported: {error}")
+        return True
+
+    def finalize_joint_session_if_ready():
+        """Coordinator completes only after receiving both local and peer results."""
+        global active_session_id, pending_peer_result, peer_last_error
+        if multi_role != "coordinator" or not active_session_id or pending_peer_result is None:
+            return
+        peer_success = pending_peer_result.get("success")
+        if not isinstance(peer_success, bool) or last_scan_success is None:
+            return
+        session_id = active_session_id
+        state = scheduler.complete_joint_session(last_scan_success, peer_success, time.time())
+        print(f"[MULTI] joint session={session_id} complete; state={state}")
+        try:
+            send_peer_command(
+                "release_peer_hold", session_id,
+                {
+                    "coordinator_success": last_scan_success,
+                    "peer_success": peer_success,
+                },
+            )
+        except RuntimeError as error:
+            peer_last_error = str(error)
+        completed_session_ids.add(session_id)
+        active_session_id = None
+        pending_peer_result = None
+        publish_multi_status(scheduler)
+
+    def process_multi_commands():
+        """Handle peer API commands in the scheduler loop, never Flask."""
+        global active_session_id, pending_peer_result, last_scan_outcome, last_scan_success
+        for command in consume_commands():
+            command_name = command.get("command")
+            session_id = command.get("session_id")
+            if command_name == "start_joint_scan":
+                if session_id in completed_session_ids or run_once_active:
+                    continue
+                active_session_id = session_id
+                defer_joint_scan(session_id, "joint_peer_command")
+                publish_multi_status(scheduler)
+            elif command_name == "joint_scan_result" and multi_role == "coordinator":
+                if session_id == active_session_id:
+                    pending_peer_result = command.get("result")
+                    finalize_joint_session_if_ready()
+            elif command_name == "release_peer_hold" and multi_role == "peer":
+                result = command.get("result") or {}
+                peer_success = result.get("peer_success")
+                coordinator_success = result.get("coordinator_success")
+                if isinstance(peer_success, bool) and isinstance(coordinator_success, bool):
+                    scheduler.complete_joint_session(peer_success, coordinator_success, time.time())
+                elif scheduler.state == scheduler.ALIGNING:
+                    scheduler.enter_peer_assisted_hold()
+                completed_session_ids.add(session_id)
+                active_session_id = None
+                publish_multi_status(scheduler)
+
+    def run_scheduled_scan(reason):
+        if not multi_enabled():
+            run_single_scan(reason)
+            return
+        if multi_role != "coordinator":
+            print("[MULTI] automatic local trigger held; only coordinator can start a joint session")
+            return
+        coordinator_start_joint_scan(reason, require_peer_loss=reason != "manual_button")
+
     while True:
         # Check manual buttons first (highest priority)
         check_manual_buttons()
         
+        if multi_enabled():
+            process_multi_commands()
+            publish_multi_status(scheduler)
+
+        if nonlocal_pending_joint["session_id"]:
+            pending_session = nonlocal_pending_joint["session_id"]
+            pending_reason = nonlocal_pending_joint["reason"]
+            nonlocal_pending_joint["session_id"] = None
+            nonlocal_pending_joint["reason"] = None
+            outcome, success = run_joint_local_scan(pending_session, pending_reason)
+            try:
+                send_peer_command(
+                    "joint_scan_result", pending_session,
+                    {"outcome": outcome, "success": success},
+                )
+            except RuntimeError as error:
+                print(f"[MULTI] peer result delivery failed: {error}")
+            publish_multi_status(scheduler)
+            continue
+
         now = time.time()
+        if (
+            multi_enabled()
+            and multi_role is None
+            and now >= next_multi_role_retry_at
+        ):
+            configure_multi_alignment()
+            next_multi_role_retry_at = now + multi_role_retry_interval_sec
         automatic_reason = None
         if rssi_sample_count != last_scheduler_sample_count:
             last_scheduler_sample_count = rssi_sample_count
-            automatic_reason = scheduler.observe_rssi(latest_rssi, rssi_is_fresh(), now)
+            if multi_enabled() and multi_role == "peer":
+                previous_joint_eligibility = joint_eligibility_ready
+                joint_eligibility_ready = scheduler.observe_joint_eligibility(
+                    latest_rssi, rssi_is_fresh(), now
+                )
+                if joint_eligibility_ready and not previous_joint_eligibility:
+                    print("[MULTI] peer is eligible; waiting for coordinator joint session")
+            elif multi_enabled() and multi_role == "coordinator":
+                previous_joint_eligibility = joint_eligibility_ready
+                joint_eligibility_ready = scheduler.observe_joint_eligibility(
+                    latest_rssi, rssi_is_fresh(), now
+                )
+                if joint_eligibility_ready:
+                    coordinator_start_joint_scan(
+                        "boot_signal_lost" if not scheduler.has_seen_normal_rssi else "signal_loss"
+                    )
+                    previous_state = scheduler.state
+                    continue
+            elif not (multi_enabled() and scheduler.state == scheduler.PEER_ASSISTED_HOLD):
+                automatic_reason = scheduler.observe_rssi(latest_rssi, rssi_is_fresh(), now)
         if automatic_reason:
             run_scheduled_scan(automatic_reason)
             previous_state = scheduler.state
@@ -951,10 +1233,10 @@ try:
                 continue
             print("[BUTTON] Start pressed.")
             manual_reason = scheduler.request_manual_scan()
-            if manual_reason:
+            if manual_reason and not (multi_enabled() and multi_role != "coordinator"):
                 run_scheduled_scan(manual_reason)
             else:
-                print("[SCHEDULER] manual request ignored: alignment in progress or waiting for RSSI")
+                print("[SCHEDULER] manual request ignored: alignment in progress, waiting for RSSI, or peer-controlled mode")
             
             # Wait for button release
             while button_is_pressed():

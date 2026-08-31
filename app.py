@@ -1,9 +1,24 @@
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, Response, render_template, request, jsonify, stream_with_context
 import json
 import os
 import subprocess
 import re
 import time
+import hmac
+import ipaddress
+import uuid
+from multi_alignment import (
+    enqueue_command,
+    determine_local_ip,
+    determine_role,
+    is_valid_command_id,
+    is_valid_session_id,
+    PeerApiClient,
+    read_status,
+)
+
+
+ALLOWED_LOG_SERVICES = {"monitor": "monitor.service", "auto": "auto.service"}
 
 # --- Configuration ---
 app = Flask(__name__, template_folder='templates', static_folder='static')
@@ -30,6 +45,9 @@ DEFAULT_CONFIG = {
     "AUTO_SIGNAL_LOSS_DURATION_SEC": 60,
     "AUTO_RESCAN_COOLDOWN_SEC": 300,
     "AUTO_RESCAN_MAX_ATTEMPTS": None,
+    "ALIGNMENT_MODE": "single",
+    "PEER_ALIGNMENT_IP": "",
+    "MULTI_ALIGNMENT_API_TOKEN": "",
     "target_frequencies_hz": [
         10507500,
         10514500,
@@ -169,6 +187,79 @@ def normalize_boolean(value, field_name):
         raise ValueError(f"{field_name} must be true or false.")
     return value
 
+
+def normalize_alignment_mode(value):
+    if value not in ("single", "multi"):
+        raise ValueError("Alignment mode must be single or multi.")
+    return value
+
+
+def normalize_ipv4(value, field_name):
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be an IPv4 address.")
+    try:
+        address = ipaddress.ip_address(value.strip())
+    except ValueError:
+        raise ValueError(f"{field_name} must be an IPv4 address.")
+    if address.version != 4 or address.is_unspecified or address.is_multicast:
+        raise ValueError(f"{field_name} must be a routable IPv4 address.")
+    return str(address)
+
+
+def validate_multi_alignment_config(data):
+    data["ALIGNMENT_MODE"] = normalize_alignment_mode(data["ALIGNMENT_MODE"])
+    peer_ip = data.get("PEER_ALIGNMENT_IP", "")
+    token = data.get("MULTI_ALIGNMENT_API_TOKEN", "")
+    if data["ALIGNMENT_MODE"] == "single":
+        data["PEER_ALIGNMENT_IP"] = peer_ip.strip() if isinstance(peer_ip, str) else ""
+        data["MULTI_ALIGNMENT_API_TOKEN"] = token if isinstance(token, str) else ""
+        return
+    data["PEER_ALIGNMENT_IP"] = normalize_ipv4(peer_ip, "Peer alignment IP")
+    if not isinstance(token, str) or len(token) < 16:
+        raise ValueError("Multi-alignment API token must contain at least 16 characters.")
+    data["MULTI_ALIGNMENT_API_TOKEN"] = token
+
+
+def is_multi_alignment_enabled(config):
+    return config.get("ALIGNMENT_MODE") == "multi"
+
+
+def internal_request_is_authorized(config):
+    if not is_multi_alignment_enabled(config):
+        return False, "Multi-alignment is not enabled."
+    supplied = request.headers.get("X-Multi-Alignment-Token", "")
+    expected = config.get("MULTI_ALIGNMENT_API_TOKEN", "")
+    if not expected or not hmac.compare_digest(supplied, expected):
+        return False, "Invalid multi-alignment token."
+    try:
+        peer_ip = str(ipaddress.ip_address(config["PEER_ALIGNMENT_IP"]))
+        remote_ip = str(ipaddress.ip_address(request.remote_addr or ""))
+    except ValueError:
+        return False, "Invalid peer request address."
+    if remote_ip != peer_ip:
+        return False, "Request is not from the configured peer IP."
+    return True, None
+
+
+def status_for_internal_api(config):
+    status = read_status()
+    status.setdefault("alignment_mode", config.get("ALIGNMENT_MODE", "single"))
+    status.setdefault("peer_configured", bool(config.get("PEER_ALIGNMENT_IP")))
+    return status
+
+
+def redact_public_multi_status(status):
+    """Public dashboard status intentionally contains no shared token."""
+    return {
+        key: status.get(key)
+        for key in (
+            "alignment_mode", "local_ip", "peer_ip", "role", "rssi",
+            "rssi_fresh", "signal_lost", "scheduler_state",
+            "active_session_id", "last_scan_outcome", "last_scan_success",
+            "peer_assisted_hold", "peer_last_error",
+        )
+    }
+
 def get_active_connection():
     """Finds the name of the active network connection."""
     output = run_command("nmcli -t -f NAME,TYPE connection show --active")
@@ -256,6 +347,7 @@ def api_config():
             data["AUTO_RESCAN_MAX_ATTEMPTS"] = normalize_positive_integer(
                 data["AUTO_RESCAN_MAX_ATTEMPTS"], "Automatic rescan maximum attempts", allow_null=True
             )
+            validate_multi_alignment_config(data)
         except ValueError as error:
             return jsonify({"status": "error", "message": str(error)}), 400
         
@@ -268,6 +360,106 @@ def api_config():
             return jsonify({"status": "success", "message": "Radio configuration saved and service restarted!"})
         else:
             return jsonify({"status": "error", "message": "Failed to write radio config."}), 500
+
+
+@app.route('/api/internal/alignment/status', methods=['GET'])
+def internal_alignment_status():
+    config = get_config()
+    allowed, message = internal_request_is_authorized(config)
+    if not allowed:
+        return jsonify({"status": "error", "message": message}), 403
+    return jsonify({"status": "success", "alignment": status_for_internal_api(config)})
+
+
+@app.route('/api/internal/alignment/command', methods=['POST'])
+def internal_alignment_command():
+    config = get_config()
+    allowed, message = internal_request_is_authorized(config)
+    if not allowed:
+        return jsonify({"status": "error", "message": message}), 403
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"status": "error", "message": "JSON command payload required."}), 400
+    command = data.get("command")
+    session_id = data.get("session_id")
+    command_id = data.get("command_id")
+    if command not in {"start_joint_scan", "joint_scan_result", "release_peer_hold"}:
+        return jsonify({"status": "error", "message": "Unsupported internal command."}), 400
+    if not is_valid_session_id(session_id) or not is_valid_command_id(command_id):
+        return jsonify({"status": "error", "message": "Invalid session ID or command ID."}), 400
+    if command in {"joint_scan_result", "release_peer_hold"}:
+        result = data.get("result")
+        if not isinstance(result, dict):
+            return jsonify({"status": "error", "message": "Joint result payload is required."}), 400
+        if command == "joint_scan_result" and not isinstance(result.get("success"), bool):
+            return jsonify({"status": "error", "message": "Joint result requires a boolean success value."}), 400
+        if command == "release_peer_hold" and not all(
+            isinstance(result.get(key), bool)
+            for key in ("coordinator_success", "peer_success")
+        ):
+            return jsonify({"status": "error", "message": "Release requires both success values."}), 400
+    queued = enqueue_command({
+        "command": command,
+        "command_id": command_id,
+        "session_id": session_id,
+        "result": data.get("result"),
+        "received_at": time.time(),
+    })
+    return jsonify({"status": "success", "queued": queued, "idempotent": not queued}), 202
+
+
+@app.route('/api/multi-alignment/status', methods=['GET'])
+def multi_alignment_status():
+    config = get_config()
+    if not is_multi_alignment_enabled(config):
+        return jsonify({"status": "error", "message": "Multi-alignment is not enabled."}), 409
+    local = redact_public_multi_status(status_for_internal_api(config))
+    local["peer_rssi"] = None
+    local["peer_last_outcome"] = None
+    try:
+        peer_status = PeerApiClient(
+            config["PEER_ALIGNMENT_IP"], config["MULTI_ALIGNMENT_API_TOKEN"]
+        ).status()
+        local["peer_rssi"] = peer_status.get("rssi")
+        local["peer_last_outcome"] = peer_status.get("last_scan_outcome")
+    except RuntimeError as error:
+        local["peer_last_error"] = str(error)
+    return jsonify(local)
+
+
+@app.route('/api/logs/stream/<service_key>', methods=['GET'])
+def stream_service_logs(service_key):
+    """Stream only the two allowlisted systemd unit logs as Server-Sent Events."""
+    service_name = ALLOWED_LOG_SERVICES.get(service_key)
+    if service_name is None:
+        return jsonify({"status": "error", "message": "Unknown log service."}), 404
+
+    def generate():
+        process = None
+        try:
+            process = subprocess.Popen(
+                ["journalctl", "-u", service_name, "-n", "100", "-f", "-o", "cat"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+            for line in iter(process.stdout.readline, ""):
+                yield f"data: {json.dumps(line.rstrip())}\n\n"
+        except OSError as error:
+            yield f"event: error\ndata: {json.dumps(str(error))}\n\n"
+        finally:
+            if process is not None:
+                process.terminate()
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+
+    response = Response(stream_with_context(generate()), mimetype="text/event-stream")
+    response.headers["Cache-Control"] = "no-cache"
+    response.headers["X-Accel-Buffering"] = "no"
+    return response
 
 # == Network Config API ==
 @app.route('/api/network', methods=['GET', 'POST'])
