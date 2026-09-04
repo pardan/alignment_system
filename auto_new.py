@@ -14,6 +14,7 @@ from multi_alignment import (
     is_success_outcome,
     new_session_id,
     publish_status,
+    select_preferred_link,
 )
 from snmp_filter_integration import (
     get_non_zero_entries,
@@ -21,6 +22,8 @@ from snmp_filter_integration import (
     configure_snmp_entries_for_calibration,
     test_snmp_entries_with_rssi,
     enable_best_entry,
+    extract_last_digit,
+    run_snmpwalk,
     run_snmpset
 )
 
@@ -51,6 +54,7 @@ DEFAULTS = {
     "ALIGNMENT_MODE": "single",
     "PEER_ALIGNMENT_IP": "",
     "MULTI_ALIGNMENT_API_TOKEN": "",
+    "MULTI_RSSI_COMPARE_INTERVAL_SEC": 5,
     "target_frequencies_hz": [
         10507500,
         10514500,
@@ -96,6 +100,7 @@ auto_rescan_max_attempts = cfg["AUTO_RESCAN_MAX_ATTEMPTS"]
 alignment_mode = cfg["ALIGNMENT_MODE"]
 peer_alignment_ip = cfg["PEER_ALIGNMENT_IP"]
 multi_alignment_api_token = cfg["MULTI_ALIGNMENT_API_TOKEN"]
+multi_rssi_compare_interval_sec = cfg["MULTI_RSSI_COMPARE_INTERVAL_SEC"]
 # SNMP Filter Configuration
 snmp_filter_host           = cfg["IP_RADIO"]
 snmp_filter_community      = cfg["SNMP_COMMUNITY"]
@@ -192,6 +197,7 @@ last_scan_outcome = None
 last_scan_success = None
 peer_last_error = None
 completed_session_ids = set()
+link_filters_active = None
 
 
 def multi_enabled():
@@ -230,6 +236,7 @@ def multi_status_snapshot(scheduler):
         "active_session_id": active_session_id,
         "last_scan_outcome": last_scan_outcome,
         "last_scan_success": last_scan_success,
+        "link_filters_active": link_filters_active,
         "peer_assisted_hold": scheduler.state == scheduler.PEER_ASSISTED_HOLD,
         "ready_for_joint_scan": (
             fresh and is_rssi_signal_lost(latest_rssi)
@@ -260,6 +267,59 @@ def send_peer_command(command, session_id, result=None):
         raise RuntimeError("Peer client is unavailable.")
     command_id = f"{session_id}-{command}-{int(time.time() * 1000)}"
     return peer_client.command(command, session_id, command_id, result=result)
+
+
+def set_link_filters_active(active):
+    """Enable or disable every configured radio filter for link selection."""
+    global link_filters_active
+    entries = get_entries_with_specific_values(
+        snmp_filter_host,
+        snmp_filter_community,
+        snmp_filter_oid,
+        port,
+        target_frequencies_hz,
+    )
+    if not entries:
+        print("[MULTI] link selection skipped: no configurable frequency filters found")
+        return False
+    value = "1" if active else "2"
+    action = "enabling" if active else "disabling"
+    print(f"[MULTI] {action} {len(entries)} frequency filter(s) for link selection")
+    succeeded = True
+    for _, _, last_digit in entries:
+        oid = f"{snmp_filter_set_oid_base}.{last_digit}"
+        if not run_snmpset(
+            snmp_filter_host, snmp_filter_set_community, oid, value, "i", port, verbose=False
+        ):
+            succeeded = False
+    expected_value = int(value)
+    states = {
+        extract_last_digit(oid): raw_value
+        for oid, raw_value in run_snmpwalk(
+            snmp_filter_host, snmp_filter_community, snmp_filter_set_oid_base, port
+        )
+        if extract_last_digit(oid) is not None
+    }
+    mismatches = []
+    for _, _, last_digit in entries:
+        try:
+            actual_value = int(states.get(last_digit, ""))
+        except (TypeError, ValueError):
+            actual_value = None
+        if actual_value != expected_value:
+            mismatches.append(f"{last_digit}={states.get(last_digit, 'missing')}")
+    if mismatches:
+        succeeded = False
+        print(
+            f"[MULTI] filter verification failed; expected {expected_value}, "
+            f"got {', '.join(mismatches)}"
+        )
+    if succeeded:
+        link_filters_active = active
+        print(f"[MULTI] local frequency filters are now {'active' if active else 'disabled'}")
+    else:
+        print(f"[MULTI] failed to finish {action} local frequency filters")
+    return succeeded
 
 # =========================
 # RSSI monitoring
@@ -996,6 +1056,9 @@ try:
     configure_multi_alignment()
     multi_role_retry_interval_sec = 5
     next_multi_role_retry_at = time.time() + multi_role_retry_interval_sec
+    link_selection_interval_sec = multi_rssi_compare_interval_sec
+    next_link_selection_at = time.time()
+    link_selection_pending = False
     
     scheduler = AutoAlignmentScheduler(
         auto_boot_rssi_minus_one_count,
@@ -1095,9 +1158,92 @@ try:
             print(f"[MULTI] local result could not be reported: {error}")
         return True
 
+    def update_preferred_link(now, after_joint_scan=False):
+        """Keep the stronger paired radio active while both controllers are idle."""
+        global peer_last_error
+        if (
+            multi_role != "coordinator"
+            or peer_client is None
+            or run_once_active
+            or active_session_id
+        ):
+            if after_joint_scan:
+                print("[MULTI] link selection waiting: coordinator session is not idle")
+            return False
+        try:
+            peer_status = peer_client.status()
+        except RuntimeError as error:
+            peer_last_error = str(error)
+            print(f"[MULTI] link selection waiting: peer status unavailable: {error}")
+            return False
+        if (
+            peer_status.get("active_session_id")
+            or peer_status.get("scheduler_state") in (
+                scheduler.ALIGNING, scheduler.SESSION_WAITING_PEER
+            )
+        ):
+            print("[MULTI] link selection waiting: peer session is not idle")
+            return False
+        if not peer_status.get("rssi_fresh") or not rssi_is_fresh():
+            print(
+                "[MULTI] link selection waiting: RSSI sample is not fresh "
+                f"(local_fresh={rssi_is_fresh()}, peer_fresh={peer_status.get('rssi_fresh')})"
+            )
+            return False
+        preferred = select_preferred_link(
+            latest_rssi,
+            peer_status.get("rssi"),
+            "local" if link_filters_active else "peer" if link_filters_active is False else None,
+        )
+        if preferred is None:
+            print(
+                f"[MULTI] link selection waiting: invalid RSSI values "
+                f"(local={latest_rssi}, peer={peer_status.get('rssi')})"
+            )
+            return False
+        print(
+            f"[MULTI] comparing link RSSI: local={latest_rssi} dBm, "
+            f"peer={peer_status.get('rssi')} dBm, preferred={preferred}"
+        )
+        desired_local_active = preferred == "local"
+        peer_active = peer_status.get("link_filters_active")
+        if (
+            not after_joint_scan
+            and link_filters_active == desired_local_active
+            and peer_active == (not desired_local_active)
+        ):
+            print(f"[MULTI] preferred link={preferred} already active")
+            return True
+        if after_joint_scan:
+            print("[MULTI] enforcing preferred link after joint scan")
+        if desired_local_active:
+            try:
+                send_peer_command("set_link_active", new_session_id(), {"active": False})
+            except RuntimeError as error:
+                peer_last_error = str(error)
+                print(f"[MULTI] link selection could not disable peer: {error}")
+                return False
+            changed = set_link_filters_active(True)
+        else:
+            changed = set_link_filters_active(False)
+            if changed:
+                try:
+                    send_peer_command("set_link_active", new_session_id(), {"active": True})
+                except RuntimeError as error:
+                    peer_last_error = str(error)
+                    print(f"[MULTI] link selection could not enable peer: {error}")
+                    return False
+        if changed:
+            print(
+                f"[MULTI] preferred link={preferred}; local RSSI={latest_rssi} dBm, "
+                f"peer RSSI={peer_status.get('rssi')} dBm"
+            )
+            publish_multi_status(scheduler)
+        return changed
+
     def finalize_joint_session_if_ready():
         """Coordinator completes only after receiving both local and peer results."""
-        global active_session_id, pending_peer_result, peer_last_error
+        global active_session_id, pending_peer_result, peer_last_error, link_selection_pending, next_link_selection_at
         if multi_role != "coordinator" or not active_session_id or pending_peer_result is None:
             return
         peer_success = pending_peer_result.get("success")
@@ -1119,6 +1265,8 @@ try:
         completed_session_ids.add(session_id)
         active_session_id = None
         pending_peer_result = None
+        link_selection_pending = True
+        next_link_selection_at = time.time()
         publish_multi_status(scheduler)
 
     def process_multi_commands():
@@ -1148,6 +1296,11 @@ try:
                 completed_session_ids.add(session_id)
                 active_session_id = None
                 publish_multi_status(scheduler)
+            elif command_name == "set_link_active":
+                desired_active = (command.get("result") or {}).get("active")
+                if isinstance(desired_active, bool) and not run_once_active and not active_session_id:
+                    set_link_filters_active(desired_active)
+                    publish_multi_status(scheduler)
 
     def run_scheduled_scan(reason):
         if not multi_enabled():
@@ -1190,6 +1343,11 @@ try:
         ):
             configure_multi_alignment()
             next_multi_role_retry_at = now + multi_role_retry_interval_sec
+        if multi_enabled() and now >= next_link_selection_at:
+            next_link_selection_at = now + link_selection_interval_sec
+            selection_complete = update_preferred_link(now, after_joint_scan=link_selection_pending)
+            if link_selection_pending:
+                link_selection_pending = not selection_complete
         automatic_reason = None
         if rssi_sample_count != last_scheduler_sample_count:
             last_scheduler_sample_count = rssi_sample_count

@@ -48,6 +48,7 @@ DEFAULT_CONFIG = {
     "ALIGNMENT_MODE": "single",
     "PEER_ALIGNMENT_IP": "",
     "MULTI_ALIGNMENT_API_TOKEN": "",
+    "MULTI_RSSI_COMPARE_INTERVAL_SEC": 5,
     "target_frequencies_hz": [
         10507500,
         10514500,
@@ -210,6 +211,9 @@ def validate_multi_alignment_config(data):
     data["ALIGNMENT_MODE"] = normalize_alignment_mode(data["ALIGNMENT_MODE"])
     peer_ip = data.get("PEER_ALIGNMENT_IP", "")
     token = data.get("MULTI_ALIGNMENT_API_TOKEN", "")
+    data["MULTI_RSSI_COMPARE_INTERVAL_SEC"] = normalize_positive_integer(
+        data.get("MULTI_RSSI_COMPARE_INTERVAL_SEC"), "Multi RSSI comparison interval"
+    )
     if data["ALIGNMENT_MODE"] == "single":
         data["PEER_ALIGNMENT_IP"] = peer_ip.strip() if isinstance(peer_ip, str) else ""
         data["MULTI_ALIGNMENT_API_TOKEN"] = token if isinstance(token, str) else ""
@@ -256,7 +260,7 @@ def redact_public_multi_status(status):
             "alignment_mode", "local_ip", "peer_ip", "role", "rssi",
             "rssi_fresh", "signal_lost", "scheduler_state",
             "active_session_id", "last_scan_outcome", "last_scan_success",
-            "peer_assisted_hold", "peer_last_error",
+            "peer_assisted_hold", "peer_last_error", "link_filters_active",
         )
     }
 
@@ -383,7 +387,7 @@ def internal_alignment_command():
     command = data.get("command")
     session_id = data.get("session_id")
     command_id = data.get("command_id")
-    if command not in {"start_joint_scan", "joint_scan_result", "release_peer_hold"}:
+    if command not in {"start_joint_scan", "joint_scan_result", "release_peer_hold", "set_link_active"}:
         return jsonify({"status": "error", "message": "Unsupported internal command."}), 400
     if not is_valid_session_id(session_id) or not is_valid_command_id(command_id):
         return jsonify({"status": "error", "message": "Invalid session ID or command ID."}), 400
@@ -397,7 +401,11 @@ def internal_alignment_command():
             isinstance(result.get(key), bool)
             for key in ("coordinator_success", "peer_success")
         ):
-            return jsonify({"status": "error", "message": "Release requires both success values."}), 400
+                return jsonify({"status": "error", "message": "Release requires both success values."}), 400
+    if command == "set_link_active":
+        result = data.get("result")
+        if not isinstance(result, dict) or not isinstance(result.get("active"), bool):
+            return jsonify({"status": "error", "message": "Link selection requires a boolean active value."}), 400
     queued = enqueue_command({
         "command": command,
         "command_id": command_id,
@@ -416,12 +424,14 @@ def multi_alignment_status():
     local = redact_public_multi_status(status_for_internal_api(config))
     local["peer_rssi"] = None
     local["peer_last_outcome"] = None
+    local["peer_link_filters_active"] = None
     try:
         peer_status = PeerApiClient(
             config["PEER_ALIGNMENT_IP"], config["MULTI_ALIGNMENT_API_TOKEN"]
         ).status()
         local["peer_rssi"] = peer_status.get("rssi")
         local["peer_last_outcome"] = peer_status.get("last_scan_outcome")
+        local["peer_link_filters_active"] = peer_status.get("link_filters_active")
     except RuntimeError as error:
         local["peer_last_error"] = str(error)
     return jsonify(local)

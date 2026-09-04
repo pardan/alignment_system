@@ -139,6 +139,29 @@ def is_success_outcome(outcome):
     return outcome in {"target_reached", "best_position_found", "signal_recovered"}
 
 
+def select_preferred_link(local_rssi, peer_rssi, current=None):
+    """Return the side with the stronger RSSI, keeping ties stable.
+
+    ``-1`` is the radio's no-signal sentinel: a valid signal on the other
+    controller wins.  If both controllers report ``-1``, no link is selected.
+    The caller is responsible for ensuring both samples are fresh.
+    """
+    valid = lambda value: isinstance(value, int) and not isinstance(value, bool)
+    if not valid(local_rssi) or not valid(peer_rssi):
+        return None
+    if local_rssi == -1 and peer_rssi == -1:
+        return None
+    if local_rssi == -1:
+        return "peer"
+    if peer_rssi == -1:
+        return "local"
+    if local_rssi > peer_rssi:
+        return "local"
+    if peer_rssi > local_rssi:
+        return "peer"
+    return current if current in {"local", "peer"} else "local"
+
+
 class PeerApiClient:
     """Small stdlib-only client for the authenticated peer API."""
 
