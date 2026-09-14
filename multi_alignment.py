@@ -11,7 +11,6 @@ import re
 import socket
 import tempfile
 import time
-import uuid
 from urllib import error, request
 from pathlib import Path
 
@@ -19,15 +18,10 @@ from pathlib import Path
 STATUS_FILE = Path("alignment_status.json")
 COMMAND_DIR = Path("alignment_commands")
 COMMAND_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
-SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$")
 
 
 def is_valid_command_id(value):
     return isinstance(value, str) and bool(COMMAND_ID_RE.fullmatch(value))
-
-
-def is_valid_session_id(value):
-    return isinstance(value, str) and bool(SESSION_ID_RE.fullmatch(value))
 
 
 def atomic_write_json(path, payload):
@@ -110,36 +104,32 @@ def consume_commands(directory=COMMAND_DIR):
     return commands
 
 
-def determine_local_ip(peer_ip, port=5000):
-    """Choose the outbound local IPv4 used to reach the configured peer only."""
-    peer = ipaddress.ip_address(peer_ip)
-    if peer.version != 4:
-        raise ValueError("Only IPv4 peer addresses are supported.")
+def determine_local_ip(paired_controller_ip, port=5000):
+    """Choose the outbound local IPv4 used to reach the configured paired controller only."""
+    paired = ipaddress.ip_address(paired_controller_ip)
+    if paired.version != 4:
+        raise ValueError("Only IPv4 paired-controller addresses are supported.")
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        sock.connect((str(peer), port))
+        sock.connect((str(paired), port))
         return sock.getsockname()[0]
     finally:
         sock.close()
 
 
-def determine_role(local_ip, peer_ip):
+def determine_role(local_ip, paired_controller_ip):
     local = ipaddress.ip_address(local_ip)
-    peer = ipaddress.ip_address(peer_ip)
-    if local.version != 4 or peer.version != 4 or local == peer:
-        raise ValueError("Local and peer addresses must be distinct IPv4 addresses.")
-    return "coordinator" if int(local) < int(peer) else "peer"
-
-
-def new_session_id():
-    return f"joint-{uuid.uuid4().hex}"
+    paired = ipaddress.ip_address(paired_controller_ip)
+    if local.version != 4 or paired.version != 4 or local == paired:
+        raise ValueError("Local and paired-controller addresses must be distinct IPv4 addresses.")
+    return "master" if int(local) < int(paired) else "slave"
 
 
 def is_success_outcome(outcome):
     return outcome in {"target_reached", "best_position_found", "signal_recovered"}
 
 
-def select_preferred_link(local_rssi, peer_rssi, current=None):
+def select_preferred_link(local_rssi, slave_rssi, current=None):
     """Return the side with the stronger RSSI, keeping ties stable.
 
     ``-1`` is the radio's no-signal sentinel: a valid signal on the other
@@ -147,29 +137,51 @@ def select_preferred_link(local_rssi, peer_rssi, current=None):
     The caller is responsible for ensuring both samples are fresh.
     """
     valid = lambda value: isinstance(value, int) and not isinstance(value, bool)
-    if not valid(local_rssi) or not valid(peer_rssi):
+    if not valid(local_rssi) or not valid(slave_rssi):
         return None
-    if local_rssi == -1 and peer_rssi == -1:
+    if local_rssi == -1 and slave_rssi == -1:
         return None
     if local_rssi == -1:
-        return "peer"
-    if peer_rssi == -1:
+        return "slave"
+    if slave_rssi == -1:
         return "local"
-    if local_rssi > peer_rssi:
+    if local_rssi > slave_rssi:
         return "local"
-    if peer_rssi > local_rssi:
-        return "peer"
-    return current if current in {"local", "peer"} else "local"
+    if slave_rssi > local_rssi:
+        return "slave"
+    return current if current in {"local", "slave"} else "local"
 
 
-class PeerApiClient:
-    """Small stdlib-only client for the authenticated peer API."""
+def select_preferred_link_with_freshness(
+    local_rssi, local_fresh, slave_rssi, slave_fresh, current=None
+):
+    """Choose the fresh controller; retain the current link only if both are stale."""
+    if slave_fresh and not local_fresh:
+        return "slave"
+    if local_fresh and not slave_fresh:
+        return "local"
+    if not local_fresh:
+        return None
+    return select_preferred_link(local_rssi, slave_rssi, current)
 
-    def __init__(self, peer_ip, token, timeout_sec=3):
-        self.peer_ip = peer_ip
+
+def requires_pre_scan_handover(role, local_link_active, slave_rssi_fresh):
+    """Only hand over an active Master link to a Slave with fresh RSSI."""
+    return (
+        role == "master"
+        and local_link_active is True
+        and slave_rssi_fresh is True
+    )
+
+
+class PairedControllerApiClient:
+    """Small stdlib-only client for the authenticated paired-controller API."""
+
+    def __init__(self, paired_controller_ip, token, timeout_sec=3):
+        self.paired_controller_ip = paired_controller_ip
         self.token = token
         self.timeout_sec = timeout_sec
-        self.base_url = f"http://{peer_ip}:5000/api/internal/alignment"
+        self.base_url = f"http://{paired_controller_ip}:5000/api/internal/alignment"
 
     def _request(self, path, payload=None):
         headers = {"X-Multi-Alignment-Token": self.token}
@@ -186,18 +198,17 @@ class PeerApiClient:
             with request.urlopen(req, timeout=self.timeout_sec) as response:
                 decoded = json.loads(response.read().decode("utf-8"))
                 if not isinstance(decoded, dict):
-                    raise RuntimeError("Peer returned an invalid response.")
+                    raise RuntimeError("Paired controller returned an invalid response.")
                 return decoded
         except (error.URLError, error.HTTPError, TimeoutError, ValueError) as exc:
-            raise RuntimeError(f"Peer request failed: {exc}")
+            raise RuntimeError(f"Paired-controller request failed: {exc}")
 
     def status(self):
         return self._request("status").get("alignment", {})
 
-    def command(self, command, session_id, command_id, result=None):
+    def command(self, command, command_id, result=None):
         payload = {
             "command": command,
-            "session_id": session_id,
             "command_id": command_id,
         }
         if result is not None:

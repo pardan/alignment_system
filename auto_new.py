@@ -7,14 +7,15 @@ import gpiod
 from threading import Thread, Event
 from alignment_scheduler import AutoAlignmentScheduler
 from multi_alignment import (
-    PeerApiClient,
+    PairedControllerApiClient,
     consume_commands,
     determine_local_ip,
     determine_role,
     is_success_outcome,
-    new_session_id,
     publish_status,
+    requires_pre_scan_handover,
     select_preferred_link,
+    select_preferred_link_with_freshness,
 )
 from snmp_filter_integration import (
     get_non_zero_entries,
@@ -52,9 +53,10 @@ DEFAULTS = {
     "AUTO_RESCAN_COOLDOWN_SEC": 300,
     "AUTO_RESCAN_MAX_ATTEMPTS": None,
     "ALIGNMENT_MODE": "single",
-    "PEER_ALIGNMENT_IP": "",
+    "PAIRED_CONTROLLER_IP": "",
     "MULTI_ALIGNMENT_API_TOKEN": "",
     "MULTI_RSSI_COMPARE_INTERVAL_SEC": 5,
+    "MULTI_PAIR_FAILURE_THRESHOLD": 3,
     "target_frequencies_hz": [
         10507500,
         10514500,
@@ -98,9 +100,10 @@ auto_signal_loss_duration_sec = cfg["AUTO_SIGNAL_LOSS_DURATION_SEC"]
 auto_rescan_cooldown_sec = cfg["AUTO_RESCAN_COOLDOWN_SEC"]
 auto_rescan_max_attempts = cfg["AUTO_RESCAN_MAX_ATTEMPTS"]
 alignment_mode = cfg["ALIGNMENT_MODE"]
-peer_alignment_ip = cfg["PEER_ALIGNMENT_IP"]
+paired_controller_ip = cfg["PAIRED_CONTROLLER_IP"]
 multi_alignment_api_token = cfg["MULTI_ALIGNMENT_API_TOKEN"]
 multi_rssi_compare_interval_sec = cfg["MULTI_RSSI_COMPARE_INTERVAL_SEC"]
+multi_pair_failure_threshold = cfg["MULTI_PAIR_FAILURE_THRESHOLD"]
 # SNMP Filter Configuration
 snmp_filter_host           = cfg["IP_RADIO"]
 snmp_filter_community      = cfg["SNMP_COMMUNITY"]
@@ -190,14 +193,14 @@ manual_request_ignored_logged = False
 # spool.  This process is the sole owner of GPIO and session state.
 multi_local_ip = None
 multi_role = None
-peer_client = None
-active_session_id = None
-pending_peer_result = None
+paired_client = None
 last_scan_outcome = None
 last_scan_success = None
-peer_last_error = None
-completed_session_ids = set()
+paired_last_error = None
 link_filters_active = None
+paired_failure_count = 0
+paired_available = False
+standalone_failover = False
 
 
 def multi_enabled():
@@ -206,19 +209,19 @@ def multi_enabled():
 
 def configure_multi_alignment():
     """Resolve role only within the configured two-controller pair."""
-    global multi_local_ip, multi_role, peer_client, peer_last_error
+    global multi_local_ip, multi_role, paired_client, paired_last_error
     if not multi_enabled():
         return
     try:
-        multi_local_ip = determine_local_ip(peer_alignment_ip)
-        multi_role = determine_role(multi_local_ip, peer_alignment_ip)
-        peer_client = PeerApiClient(peer_alignment_ip, multi_alignment_api_token)
+        multi_local_ip = determine_local_ip(paired_controller_ip)
+        multi_role = determine_role(multi_local_ip, paired_controller_ip)
+        paired_client = PairedControllerApiClient(paired_controller_ip, multi_alignment_api_token)
         print(
-            f"[MULTI] enabled: local={multi_local_ip} peer={peer_alignment_ip} "
+            f"[MULTI] enabled: local={multi_local_ip} paired={paired_controller_ip} "
             f"role={multi_role}"
         )
     except (ValueError, OSError) as error:
-        peer_last_error = str(error)
+        paired_last_error = str(error)
         print(f"[MULTI] unavailable: {error}")
 
 
@@ -227,24 +230,19 @@ def multi_status_snapshot(scheduler):
     return {
         "alignment_mode": alignment_mode,
         "local_ip": multi_local_ip,
-        "peer_ip": peer_alignment_ip if multi_enabled() else None,
+        "paired_controller_ip": paired_controller_ip if multi_enabled() else None,
         "role": multi_role,
         "rssi": latest_rssi,
         "rssi_fresh": fresh,
         "signal_lost": is_rssi_signal_lost(latest_rssi) if fresh else None,
         "scheduler_state": scheduler.state,
-        "active_session_id": active_session_id,
         "last_scan_outcome": last_scan_outcome,
         "last_scan_success": last_scan_success,
         "link_filters_active": link_filters_active,
-        "peer_assisted_hold": scheduler.state == scheduler.PEER_ASSISTED_HOLD,
-        "ready_for_joint_scan": (
-            fresh and is_rssi_signal_lost(latest_rssi)
-            and joint_eligibility_ready
-            and not run_once_active
-            and scheduler.state not in (scheduler.ALIGNING, scheduler.SESSION_WAITING_PEER)
-        ),
-        "peer_last_error": peer_last_error,
+        "paired_available": paired_available,
+        "paired_failure_count": paired_failure_count,
+        "standalone_failover": standalone_failover,
+        "paired_last_error": paired_last_error,
     }
 
 
@@ -252,21 +250,46 @@ def publish_multi_status(scheduler):
     publish_status(multi_status_snapshot(scheduler))
 
 
-def peer_is_eligible(status):
-    return bool(
-        status.get("rssi_fresh")
-        and status.get("signal_lost")
-        and status.get("ready_for_joint_scan")
-        and status.get("alignment_mode") == "multi"
-    )
+def send_paired_command(command, command_id, result=None):
+    """Use a distinct id for retriable, idempotent paired-controller commands."""
+    if paired_client is None:
+        raise RuntimeError("Paired-controller client is unavailable.")
+    return paired_client.command(command, command_id, result=result)
 
 
-def send_peer_command(command, session_id, result=None):
-    """Use a distinct id for retriable, idempotent peer commands."""
-    if peer_client is None:
-        raise RuntimeError("Peer client is unavailable.")
-    command_id = f"{session_id}-{command}-{int(time.time() * 1000)}"
-    return peer_client.command(command, session_id, command_id, result=result)
+def paired_status_or_none():
+    """Use HTTP reachability for paired-controller failover, not wall-clock time."""
+    global paired_available, paired_failure_count, standalone_failover, paired_last_error
+    if paired_client is None:
+        return None
+    try:
+        status = paired_client.status()
+    except RuntimeError as error:
+        paired_last_error = str(error)
+        paired_failure_count += 1
+        paired_available = False
+        if paired_failure_count >= multi_pair_failure_threshold:
+            if not standalone_failover:
+                print(
+                    f"[MULTI] paired controller unavailable after {paired_failure_count} failed checks; "
+                    "entering standalone failover"
+                )
+            standalone_failover = True
+        return None
+    if standalone_failover:
+        print("[MULTI] paired-controller connection restored; leaving standalone failover")
+    paired_available = True
+    paired_failure_count = 0
+    standalone_failover = False
+    paired_last_error = None
+    return status
+
+
+def refresh_paired_availability():
+    """Probe the paired controller once per comparison interval."""
+    if multi_enabled() and paired_client is not None:
+        return paired_status_or_none()
+    return None
 
 
 def set_link_filters_active(active):
@@ -320,6 +343,46 @@ def set_link_filters_active(active):
     else:
         print(f"[MULTI] failed to finish {action} local frequency filters")
     return succeeded
+
+
+def read_link_filters_active():
+    """Read the physical state of every configured local frequency filter.
+
+    The process can restart while a filter is enabled.  In that case the
+    in-memory ``link_filters_active`` value is not authoritative; the SNMP
+    enable OIDs (``.4``) are.  Return ``None`` for an incomplete or mixed
+    result so the selection code re-applies its desired state safely.
+    """
+    entries = get_entries_with_specific_values(
+        snmp_filter_host,
+        snmp_filter_community,
+        snmp_filter_oid,
+        port,
+        target_frequencies_hz,
+    )
+    if not entries:
+        print("[MULTI] cannot read local filter state: no configured frequency filters found")
+        return None
+    states = {
+        extract_last_digit(oid): raw_value
+        for oid, raw_value in run_snmpwalk(
+            snmp_filter_host, snmp_filter_community, snmp_filter_set_oid_base, port
+        )
+        if extract_last_digit(oid) is not None
+    }
+    values = []
+    for _, _, last_digit in entries:
+        try:
+            values.append(int(states[last_digit]))
+        except (KeyError, TypeError, ValueError):
+            print(f"[MULTI] cannot read local filter state: filter {last_digit} is missing or invalid")
+            return None
+    if all(value == 1 for value in values):
+        return True
+    if all(value == 2 for value in values):
+        return False
+    print(f"[MULTI] local filter state is mixed: {values}")
+    return None
 
 # =========================
 # RSSI monitoring
@@ -864,21 +927,43 @@ def record_manual_request_during_alignment():
 
 def finalize_alignment(outcome, restore_filters=False):
     """Leave the hardware and LED/monitor services in a safe, known state."""
-    global run_once_active, run_once_was_aborted
+    global run_once_active, run_once_was_aborted, link_filters_active
     run_once_active = False
     run_once_was_aborted = outcome == "aborted"
     all_low()
     stop_led_sequence()
+    restored_filters = False
     if restore_filters:
         print("\n[ALIGNMENT] Re-enabling all non-zero SNMP entries...")
         all_non_zero_entries = get_non_zero_entries(
             snmp_filter_host, snmp_filter_community, snmp_filter_oid, port, max_entries=None
         )
         if all_non_zero_entries:
+            restored_filters = True
             for _, _, last_digit in all_non_zero_entries:
                 enable_oid = f"{snmp_filter_set_oid_base}.{last_digit}"
-                run_snmpset(snmp_filter_host, snmp_filter_set_community, enable_oid, '1', 'i', port, verbose=False)
-            print("[ALIGNMENT] All non-zero SNMP entries re-enabled")
+                if not run_snmpset(
+                    snmp_filter_host,
+                    snmp_filter_set_community,
+                    enable_oid,
+                    '1',
+                    'i',
+                    port,
+                    verbose=False,
+                ):
+                    restored_filters = False
+            if restored_filters:
+                print("[ALIGNMENT] All non-zero SNMP entries re-enabled")
+            else:
+                print("[ALIGNMENT] Failed to re-enable one or more SNMP entries")
+
+    # A completed scan enables a best filter before returning.  Likewise, a
+    # successful recovery path above enables every filter.  Keep the
+    # coordination state aligned with the physical radio, otherwise the
+    # Master can incorrectly conclude that only the Slave is active.
+    if multi_enabled() and (is_success_outcome(outcome) or restored_filters):
+        link_filters_active = True
+        print("[MULTI] local frequency filters are active after alignment")
     start_monitor_service()
     return outcome
 
@@ -1058,7 +1143,6 @@ try:
     next_multi_role_retry_at = time.time() + multi_role_retry_interval_sec
     link_selection_interval_sec = multi_rssi_compare_interval_sec
     next_link_selection_at = time.time()
-    link_selection_pending = False
     
     scheduler = AutoAlignmentScheduler(
         auto_boot_rssi_minus_one_count,
@@ -1069,8 +1153,6 @@ try:
     )
     previous_state = scheduler.state
     last_scheduler_sample_count = -1
-    nonlocal_pending_joint = {"session_id": None, "reason": None}
-    joint_eligibility_ready = False
 
     def run_single_scan(reason):
         """Existing single-controller behavior, retained unchanged by default."""
@@ -1090,250 +1172,176 @@ try:
         else:
             print(f"[SCHEDULER] outcome={outcome}; state={scheduler.state}")
 
-    def run_joint_local_scan(session_id, reason):
-        """Perform the local scan for one already-authorized joint session."""
+    def run_multi_local_scan(reason):
+        """Run this controller's independent recovery scan in multi mode."""
         global last_scan_outcome, last_scan_success
-        scheduler.begin_joint_scan(reason)
-        publish_multi_status(scheduler)
-        all_low()
+        print(f"[MULTI] local recovery scan requested: reason={reason}")
+        if multi_role == "master" and link_filters_active is True:
+            paired_status = paired_status_or_none()
+            slave_rssi_fresh = bool(paired_status and paired_status.get("rssi_fresh"))
+            if requires_pre_scan_handover(
+                multi_role, link_filters_active, slave_rssi_fresh
+            ):
+                print("[MULTI] Master link is active; handing over to Slave before local scan")
+                if not set_paired_link_active(True):
+                    print("[MULTI] Master scan deferred: Slave link did not confirm active")
+                    scheduler.complete_scan("handover_failed", latest_rssi, rssi_is_fresh(), time.time())
+                    publish_multi_status(scheduler)
+                    return None, False
+                if not set_link_filters_active(False):
+                    print("[MULTI] Master scan deferred: could not release Master link after Slave handover")
+                    scheduler.complete_scan("handover_failed", latest_rssi, rssi_is_fresh(), time.time())
+                    publish_multi_status(scheduler)
+                    return None, False
+            else:
+                print("[MULTI] Slave RSSI is not fresh; Master scanning without handover")
+        if scheduler.state != scheduler.ALIGNING and not scheduler.begin_local_scan(reason):
+            print("[MULTI] local recovery scan held by scheduler state or retry limit")
+            return None, False
         outcome = run_once(reason)
         last_scan_outcome = outcome
         last_scan_success = is_success_outcome(outcome)
+        scheduler.complete_scan(outcome, latest_rssi, rssi_is_fresh(), time.time())
         publish_multi_status(scheduler)
         return outcome, last_scan_success
 
-    def defer_joint_scan(session_id, reason):
-        """Run a peer-authorized scan after the main loop returns from command handling."""
-        nonlocal_pending_joint["session_id"] = session_id
-        nonlocal_pending_joint["reason"] = reason
+    def set_paired_link_active(active):
+        """Ask the Slave to change link state and confirm it before switching locally."""
+        global paired_last_error
+        command_id = f"set-link-{int(time.time() * 1000)}"
+        try:
+            send_paired_command("set_link_active", command_id, {"active": active})
+        except RuntimeError as error:
+            paired_last_error = str(error)
+            print(f"[MULTI] link selection could not request paired-controller change: {error}")
+            return False
 
-    def coordinator_start_joint_scan(reason, require_peer_loss=True):
-        """Authorize exactly one joint scan after verifying both paired units."""
-        global active_session_id, peer_last_error, joint_eligibility_ready
-        if peer_client is None or multi_role != "coordinator":
-            return False
-        try:
-            peer_status = peer_client.status()
-        except RuntimeError as error:
-            peer_last_error = str(error)
-            print(f"[MULTI] peer unavailable; holding automatic scan: {error}")
-            publish_multi_status(scheduler)
-            return False
-        if require_peer_loss and not peer_is_eligible(peer_status):
-            print("[MULTI] peer is not eligible for joint scan; holding automatic scan")
-            publish_multi_status(scheduler)
-            return False
-        if not require_peer_loss and not (
-            peer_status.get("alignment_mode") == "multi"
-            and not peer_status.get("active_session_id")
-            and peer_status.get("scheduler_state") not in (
-                scheduler.ALIGNING, scheduler.SESSION_WAITING_PEER
-            )
-        ):
-            print("[MULTI] peer is busy or unavailable for manual joint scan")
-            publish_multi_status(scheduler)
-            return False
-        if not scheduler.begin_joint_wait(reason):
-            return False
-        joint_eligibility_ready = False
-        active_session_id = new_session_id()
-        publish_multi_status(scheduler)
-        try:
-            send_peer_command("start_joint_scan", active_session_id)
-        except RuntimeError as error:
-            peer_last_error = str(error)
-            scheduler.state = scheduler.IDLE
-            active_session_id = None
-            print(f"[MULTI] could not start peer scan: {error}")
-            publish_multi_status(scheduler)
-            return False
-        outcome, success = run_joint_local_scan(active_session_id, f"joint_{reason}")
-        try:
-            send_peer_command(
-                "joint_scan_result", active_session_id,
-                {"outcome": outcome, "success": success},
-            )
-        except RuntimeError as error:
-            peer_last_error = str(error)
-            print(f"[MULTI] local result could not be reported: {error}")
-        return True
+        deadline = time.time() + max(3, multi_rssi_compare_interval_sec + 1)
+        while time.time() < deadline:
+            time.sleep(0.1)
+            paired_status = paired_status_or_none()
+            if paired_status is None:
+                continue
+            if paired_status.get("link_filters_active") is active:
+                return True
+        paired_last_error = (
+            f"Paired controller did not confirm link {'activation' if active else 'deactivation'}."
+        )
+        print(f"[MULTI] {paired_last_error}")
+        return False
 
-    def update_preferred_link(now, after_joint_scan=False):
+    def update_preferred_link(now, paired_status=None, paired_checked=False):
         """Keep the stronger paired radio active while both controllers are idle."""
-        global peer_last_error
+        global paired_last_error, link_filters_active
         if (
-            multi_role != "coordinator"
-            or peer_client is None
+            multi_role != "master"
+            or paired_client is None
             or run_once_active
-            or active_session_id
         ):
-            if after_joint_scan:
-                print("[MULTI] link selection waiting: coordinator session is not idle")
             return False
-        try:
-            peer_status = peer_client.status()
-        except RuntimeError as error:
-            peer_last_error = str(error)
-            print(f"[MULTI] link selection waiting: peer status unavailable: {error}")
+        if paired_status is None and not paired_checked:
+            paired_status = paired_status_or_none()
+        if paired_status is None:
+            print("[MULTI] link selection waiting: paired-controller status unavailable")
             return False
-        if (
-            peer_status.get("active_session_id")
-            or peer_status.get("scheduler_state") in (
-                scheduler.ALIGNING, scheduler.SESSION_WAITING_PEER
-            )
-        ):
-            print("[MULTI] link selection waiting: peer session is not idle")
+        if paired_status.get("scheduler_state") == scheduler.ALIGNING:
+            print("[MULTI] link selection waiting: paired-controller scan is in progress")
             return False
-        if not peer_status.get("rssi_fresh") or not rssi_is_fresh():
-            print(
-                "[MULTI] link selection waiting: RSSI sample is not fresh "
-                f"(local_fresh={rssi_is_fresh()}, peer_fresh={peer_status.get('rssi_fresh')})"
-            )
-            return False
-        preferred = select_preferred_link(
+        local_rssi_fresh = rssi_is_fresh()
+        paired_rssi_fresh = bool(paired_status.get("rssi_fresh"))
+        preferred = select_preferred_link_with_freshness(
             latest_rssi,
-            peer_status.get("rssi"),
-            "local" if link_filters_active else "peer" if link_filters_active is False else None,
+            local_rssi_fresh,
+            paired_status.get("rssi"),
+            paired_rssi_fresh,
+            "local" if link_filters_active else "slave" if link_filters_active is False else None,
         )
         if preferred is None:
             print(
-                f"[MULTI] link selection waiting: invalid RSSI values "
-                f"(local={latest_rssi}, peer={peer_status.get('rssi')})"
+                "[MULTI] link selection waiting: RSSI sample is not fresh "
+                f"(local_fresh={local_rssi_fresh}, paired_fresh={paired_rssi_fresh})"
             )
             return False
-        print(
+        if not local_rssi_fresh:
+            print(
+                "[MULTI] local RSSI unavailable while paired-controller RSSI is fresh; "
+                "activating paired controller link"
+            )
+        else:
+            print(
             f"[MULTI] comparing link RSSI: local={latest_rssi} dBm, "
-            f"peer={peer_status.get('rssi')} dBm, preferred={preferred}"
-        )
+            f"paired={paired_status.get('rssi')} dBm, preferred={preferred}"
+            )
         desired_local_active = preferred == "local"
-        peer_active = peer_status.get("link_filters_active")
+        # Do not rely solely on the in-memory flag: after auto.service is
+        # restarted it begins as None even if the Master filter remains
+        # enabled in the radio.  Reconcile from SNMP before deciding a link is
+        # already selected or whether a disable command is necessary.
+        physical_local_active = read_link_filters_active()
+        if physical_local_active is not None:
+            if link_filters_active != physical_local_active:
+                print(
+                    "[MULTI] reconciling local filter state from SNMP: "
+                    f"{'active' if physical_local_active else 'disabled'}"
+                )
+            link_filters_active = physical_local_active
+        paired_active = paired_status.get("link_filters_active")
         if (
-            not after_joint_scan
-            and link_filters_active == desired_local_active
-            and peer_active == (not desired_local_active)
+            link_filters_active == desired_local_active
+            and paired_active == (not desired_local_active)
         ):
             print(f"[MULTI] preferred link={preferred} already active")
             return True
-        if after_joint_scan:
-            print("[MULTI] enforcing preferred link after joint scan")
         if desired_local_active:
-            try:
-                send_peer_command("set_link_active", new_session_id(), {"active": False})
-            except RuntimeError as error:
-                peer_last_error = str(error)
-                print(f"[MULTI] link selection could not disable peer: {error}")
+            # Bring the target up first.  If the remote disable fails, both
+            # links remain usable rather than leaving the radio with no link.
+            if not link_filters_active and not set_link_filters_active(True):
                 return False
-            changed = set_link_filters_active(True)
+            if paired_active and not set_paired_link_active(False):
+                return False
+            changed = True
         else:
-            changed = set_link_filters_active(False)
-            if changed:
-                try:
-                    send_peer_command("set_link_active", new_session_id(), {"active": True})
-                except RuntimeError as error:
-                    peer_last_error = str(error)
-                    print(f"[MULTI] link selection could not enable peer: {error}")
-                    return False
+            # Confirm Slave link activation before taking the Master link down.
+            if not paired_active and not set_paired_link_active(True):
+                return False
+            # ``None`` means SNMP reported a mixed/unreadable physical state;
+            # force an explicit disable instead of assuming the Master is off.
+            if link_filters_active is not False and not set_link_filters_active(False):
+                return False
+            changed = True
         if changed:
             print(
                 f"[MULTI] preferred link={preferred}; local RSSI={latest_rssi} dBm, "
-                f"peer RSSI={peer_status.get('rssi')} dBm"
+                f"paired-controller RSSI={paired_status.get('rssi')} dBm"
             )
             publish_multi_status(scheduler)
         return changed
 
-    def finalize_joint_session_if_ready():
-        """Coordinator completes only after receiving both local and peer results."""
-        global active_session_id, pending_peer_result, peer_last_error, link_selection_pending, next_link_selection_at
-        if multi_role != "coordinator" or not active_session_id or pending_peer_result is None:
-            return
-        peer_success = pending_peer_result.get("success")
-        if not isinstance(peer_success, bool) or last_scan_success is None:
-            return
-        session_id = active_session_id
-        state = scheduler.complete_joint_session(last_scan_success, peer_success, time.time())
-        print(f"[MULTI] joint session={session_id} complete; state={state}")
-        try:
-            send_peer_command(
-                "release_peer_hold", session_id,
-                {
-                    "coordinator_success": last_scan_success,
-                    "peer_success": peer_success,
-                },
-            )
-        except RuntimeError as error:
-            peer_last_error = str(error)
-        completed_session_ids.add(session_id)
-        active_session_id = None
-        pending_peer_result = None
-        link_selection_pending = True
-        next_link_selection_at = time.time()
-        publish_multi_status(scheduler)
-
-    def process_multi_commands():
-        """Handle peer API commands in the scheduler loop, never Flask."""
-        global active_session_id, pending_peer_result, last_scan_outcome, last_scan_success
-        for command in consume_commands():
-            command_name = command.get("command")
-            session_id = command.get("session_id")
-            if command_name == "start_joint_scan":
-                if session_id in completed_session_ids or run_once_active:
-                    continue
-                active_session_id = session_id
-                defer_joint_scan(session_id, "joint_peer_command")
-                publish_multi_status(scheduler)
-            elif command_name == "joint_scan_result" and multi_role == "coordinator":
-                if session_id == active_session_id:
-                    pending_peer_result = command.get("result")
-                    finalize_joint_session_if_ready()
-            elif command_name == "release_peer_hold" and multi_role == "peer":
-                result = command.get("result") or {}
-                peer_success = result.get("peer_success")
-                coordinator_success = result.get("coordinator_success")
-                if isinstance(peer_success, bool) and isinstance(coordinator_success, bool):
-                    scheduler.complete_joint_session(peer_success, coordinator_success, time.time())
-                elif scheduler.state == scheduler.ALIGNING:
-                    scheduler.enter_peer_assisted_hold()
-                completed_session_ids.add(session_id)
-                active_session_id = None
-                publish_multi_status(scheduler)
-            elif command_name == "set_link_active":
-                desired_active = (command.get("result") or {}).get("active")
-                if isinstance(desired_active, bool) and not run_once_active and not active_session_id:
-                    set_link_filters_active(desired_active)
-                    publish_multi_status(scheduler)
-
     def run_scheduled_scan(reason):
-        if not multi_enabled():
+        if multi_enabled():
+            run_multi_local_scan(reason)
+        else:
             run_single_scan(reason)
-            return
-        if multi_role != "coordinator":
-            print("[MULTI] automatic local trigger held; only coordinator can start a joint session")
-            return
-        coordinator_start_joint_scan(reason, require_peer_loss=reason != "manual_button")
 
     while True:
         # Check manual buttons first (highest priority)
         check_manual_buttons()
         
         if multi_enabled():
-            process_multi_commands()
+            # The only remote control retained in independent-recovery mode is
+            # Master selecting the active link.  Leave commands queued while a
+            # local scan owns the radio filters.
+            if not run_once_active:
+                for command in consume_commands():
+                    if (
+                        multi_role == "slave"
+                        and command.get("command") == "set_link_active"
+                    ):
+                        desired_active = (command.get("result") or {}).get("active")
+                        if isinstance(desired_active, bool):
+                            set_link_filters_active(desired_active)
+                            publish_multi_status(scheduler)
             publish_multi_status(scheduler)
-
-        if nonlocal_pending_joint["session_id"]:
-            pending_session = nonlocal_pending_joint["session_id"]
-            pending_reason = nonlocal_pending_joint["reason"]
-            nonlocal_pending_joint["session_id"] = None
-            nonlocal_pending_joint["reason"] = None
-            outcome, success = run_joint_local_scan(pending_session, pending_reason)
-            try:
-                send_peer_command(
-                    "joint_scan_result", pending_session,
-                    {"outcome": outcome, "success": success},
-                )
-            except RuntimeError as error:
-                print(f"[MULTI] peer result delivery failed: {error}")
-            publish_multi_status(scheduler)
-            continue
 
         now = time.time()
         if (
@@ -1345,32 +1353,21 @@ try:
             next_multi_role_retry_at = now + multi_role_retry_interval_sec
         if multi_enabled() and now >= next_link_selection_at:
             next_link_selection_at = now + link_selection_interval_sec
-            selection_complete = update_preferred_link(now, after_joint_scan=link_selection_pending)
-            if link_selection_pending:
-                link_selection_pending = not selection_complete
+            cached_paired_status = refresh_paired_availability()
+            update_preferred_link(
+                now,
+                paired_status=cached_paired_status,
+                paired_checked=True,
+            )
+            if standalone_failover and not run_once_active and not link_filters_active:
+                print("[MULTI] standalone failover: enabling local frequency filters")
+                set_link_filters_active(True)
         automatic_reason = None
         if rssi_sample_count != last_scheduler_sample_count:
             last_scheduler_sample_count = rssi_sample_count
-            if multi_enabled() and multi_role == "peer":
-                previous_joint_eligibility = joint_eligibility_ready
-                joint_eligibility_ready = scheduler.observe_joint_eligibility(
-                    latest_rssi, rssi_is_fresh(), now
-                )
-                if joint_eligibility_ready and not previous_joint_eligibility:
-                    print("[MULTI] peer is eligible; waiting for coordinator joint session")
-            elif multi_enabled() and multi_role == "coordinator":
-                previous_joint_eligibility = joint_eligibility_ready
-                joint_eligibility_ready = scheduler.observe_joint_eligibility(
-                    latest_rssi, rssi_is_fresh(), now
-                )
-                if joint_eligibility_ready:
-                    coordinator_start_joint_scan(
-                        "boot_signal_lost" if not scheduler.has_seen_normal_rssi else "signal_loss"
-                    )
-                    previous_state = scheduler.state
-                    continue
-            elif not (multi_enabled() and scheduler.state == scheduler.PEER_ASSISTED_HOLD):
-                automatic_reason = scheduler.observe_rssi(latest_rssi, rssi_is_fresh(), now)
+            automatic_reason = scheduler.observe_rssi(
+                latest_rssi, rssi_is_fresh(), now
+            )
         if automatic_reason:
             run_scheduled_scan(automatic_reason)
             previous_state = scheduler.state
@@ -1391,10 +1388,10 @@ try:
                 continue
             print("[BUTTON] Start pressed.")
             manual_reason = scheduler.request_manual_scan()
-            if manual_reason and not (multi_enabled() and multi_role != "coordinator"):
+            if manual_reason:
                 run_scheduled_scan(manual_reason)
             else:
-                print("[SCHEDULER] manual request ignored: alignment in progress, waiting for RSSI, or peer-controlled mode")
+                print("[SCHEDULER] manual request ignored: alignment in progress or waiting for RSSI")
             
             # Wait for button release
             while button_is_pressed():

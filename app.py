@@ -12,8 +12,7 @@ from multi_alignment import (
     determine_local_ip,
     determine_role,
     is_valid_command_id,
-    is_valid_session_id,
-    PeerApiClient,
+    PairedControllerApiClient,
     read_status,
 )
 
@@ -46,9 +45,10 @@ DEFAULT_CONFIG = {
     "AUTO_RESCAN_COOLDOWN_SEC": 300,
     "AUTO_RESCAN_MAX_ATTEMPTS": None,
     "ALIGNMENT_MODE": "single",
-    "PEER_ALIGNMENT_IP": "",
+    "PAIRED_CONTROLLER_IP": "",
     "MULTI_ALIGNMENT_API_TOKEN": "",
     "MULTI_RSSI_COMPARE_INTERVAL_SEC": 5,
+    "MULTI_PAIR_FAILURE_THRESHOLD": 3,
     "target_frequencies_hz": [
         10507500,
         10514500,
@@ -209,16 +209,19 @@ def normalize_ipv4(value, field_name):
 
 def validate_multi_alignment_config(data):
     data["ALIGNMENT_MODE"] = normalize_alignment_mode(data["ALIGNMENT_MODE"])
-    peer_ip = data.get("PEER_ALIGNMENT_IP", "")
+    paired_controller_ip = data.get("PAIRED_CONTROLLER_IP", "")
     token = data.get("MULTI_ALIGNMENT_API_TOKEN", "")
     data["MULTI_RSSI_COMPARE_INTERVAL_SEC"] = normalize_positive_integer(
         data.get("MULTI_RSSI_COMPARE_INTERVAL_SEC"), "Multi RSSI comparison interval"
     )
+    data["MULTI_PAIR_FAILURE_THRESHOLD"] = normalize_positive_integer(
+        data.get("MULTI_PAIR_FAILURE_THRESHOLD"), "Multi paired-controller failure threshold"
+    )
     if data["ALIGNMENT_MODE"] == "single":
-        data["PEER_ALIGNMENT_IP"] = peer_ip.strip() if isinstance(peer_ip, str) else ""
+        data["PAIRED_CONTROLLER_IP"] = paired_controller_ip.strip() if isinstance(paired_controller_ip, str) else ""
         data["MULTI_ALIGNMENT_API_TOKEN"] = token if isinstance(token, str) else ""
         return
-    data["PEER_ALIGNMENT_IP"] = normalize_ipv4(peer_ip, "Peer alignment IP")
+    data["PAIRED_CONTROLLER_IP"] = normalize_ipv4(paired_controller_ip, "Paired controller IP")
     if not isinstance(token, str) or len(token) < 16:
         raise ValueError("Multi-alignment API token must contain at least 16 characters.")
     data["MULTI_ALIGNMENT_API_TOKEN"] = token
@@ -236,19 +239,19 @@ def internal_request_is_authorized(config):
     if not expected or not hmac.compare_digest(supplied, expected):
         return False, "Invalid multi-alignment token."
     try:
-        peer_ip = str(ipaddress.ip_address(config["PEER_ALIGNMENT_IP"]))
+        paired_controller_ip = str(ipaddress.ip_address(config["PAIRED_CONTROLLER_IP"]))
         remote_ip = str(ipaddress.ip_address(request.remote_addr or ""))
     except ValueError:
-        return False, "Invalid peer request address."
-    if remote_ip != peer_ip:
-        return False, "Request is not from the configured peer IP."
+        return False, "Invalid paired-controller request address."
+    if remote_ip != paired_controller_ip:
+        return False, "Request is not from the configured paired controller IP."
     return True, None
 
 
 def status_for_internal_api(config):
     status = read_status()
     status.setdefault("alignment_mode", config.get("ALIGNMENT_MODE", "single"))
-    status.setdefault("peer_configured", bool(config.get("PEER_ALIGNMENT_IP")))
+    status.setdefault("paired_controller_configured", bool(config.get("PAIRED_CONTROLLER_IP")))
     return status
 
 
@@ -257,10 +260,10 @@ def redact_public_multi_status(status):
     return {
         key: status.get(key)
         for key in (
-            "alignment_mode", "local_ip", "peer_ip", "role", "rssi",
+            "alignment_mode", "local_ip", "paired_controller_ip", "role", "rssi",
             "rssi_fresh", "signal_lost", "scheduler_state",
-            "active_session_id", "last_scan_outcome", "last_scan_success",
-            "peer_assisted_hold", "peer_last_error", "link_filters_active",
+            "last_scan_outcome", "last_scan_success", "paired_last_error", "link_filters_active",
+            "paired_available", "paired_failure_count", "standalone_failover",
         )
     }
 
@@ -385,23 +388,11 @@ def internal_alignment_command():
     if not isinstance(data, dict):
         return jsonify({"status": "error", "message": "JSON command payload required."}), 400
     command = data.get("command")
-    session_id = data.get("session_id")
     command_id = data.get("command_id")
-    if command not in {"start_joint_scan", "joint_scan_result", "release_peer_hold", "set_link_active"}:
+    if command != "set_link_active":
         return jsonify({"status": "error", "message": "Unsupported internal command."}), 400
-    if not is_valid_session_id(session_id) or not is_valid_command_id(command_id):
-        return jsonify({"status": "error", "message": "Invalid session ID or command ID."}), 400
-    if command in {"joint_scan_result", "release_peer_hold"}:
-        result = data.get("result")
-        if not isinstance(result, dict):
-            return jsonify({"status": "error", "message": "Joint result payload is required."}), 400
-        if command == "joint_scan_result" and not isinstance(result.get("success"), bool):
-            return jsonify({"status": "error", "message": "Joint result requires a boolean success value."}), 400
-        if command == "release_peer_hold" and not all(
-            isinstance(result.get(key), bool)
-            for key in ("coordinator_success", "peer_success")
-        ):
-                return jsonify({"status": "error", "message": "Release requires both success values."}), 400
+    if not is_valid_command_id(command_id):
+        return jsonify({"status": "error", "message": "Invalid command ID."}), 400
     if command == "set_link_active":
         result = data.get("result")
         if not isinstance(result, dict) or not isinstance(result.get("active"), bool):
@@ -409,7 +400,6 @@ def internal_alignment_command():
     queued = enqueue_command({
         "command": command,
         "command_id": command_id,
-        "session_id": session_id,
         "result": data.get("result"),
         "received_at": time.time(),
     })
@@ -422,18 +412,18 @@ def multi_alignment_status():
     if not is_multi_alignment_enabled(config):
         return jsonify({"status": "error", "message": "Multi-alignment is not enabled."}), 409
     local = redact_public_multi_status(status_for_internal_api(config))
-    local["peer_rssi"] = None
-    local["peer_last_outcome"] = None
-    local["peer_link_filters_active"] = None
+    local["paired_rssi"] = None
+    local["paired_last_outcome"] = None
+    local["paired_link_filters_active"] = None
     try:
-        peer_status = PeerApiClient(
-            config["PEER_ALIGNMENT_IP"], config["MULTI_ALIGNMENT_API_TOKEN"]
+        paired_status = PairedControllerApiClient(
+            config["PAIRED_CONTROLLER_IP"], config["MULTI_ALIGNMENT_API_TOKEN"]
         ).status()
-        local["peer_rssi"] = peer_status.get("rssi")
-        local["peer_last_outcome"] = peer_status.get("last_scan_outcome")
-        local["peer_link_filters_active"] = peer_status.get("link_filters_active")
+        local["paired_rssi"] = paired_status.get("rssi")
+        local["paired_last_outcome"] = paired_status.get("last_scan_outcome")
+        local["paired_link_filters_active"] = paired_status.get("link_filters_active")
     except RuntimeError as error:
-        local["peer_last_error"] = str(error)
+        local["paired_last_error"] = str(error)
     return jsonify(local)
 
 

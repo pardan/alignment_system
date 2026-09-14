@@ -4,23 +4,52 @@ import unittest
 from pathlib import Path
 
 from alignment_scheduler import AutoAlignmentScheduler
-from multi_alignment import consume_commands, determine_role, enqueue_command, select_preferred_link
+from multi_alignment import (
+    consume_commands,
+    determine_role,
+    enqueue_command,
+    requires_pre_scan_handover,
+    select_preferred_link,
+    select_preferred_link_with_freshness,
+)
 
 
 class MultiAlignmentSchedulerTests(unittest.TestCase):
-    def test_ip_pair_elects_lower_address_as_coordinator(self):
+    def test_ip_pair_elects_lower_address_as_master(self):
         self.assertEqual(
-            determine_role("192.168.1.10", "192.168.1.11"), "coordinator"
+            determine_role("192.168.1.10", "192.168.1.11"), "master"
         )
-        self.assertEqual(determine_role("192.168.1.11", "192.168.1.10"), "peer")
+        self.assertEqual(determine_role("192.168.1.11", "192.168.1.10"), "slave")
 
     def test_stronger_rssi_wins_and_equal_rssi_keeps_current_link(self):
         self.assertEqual(select_preferred_link(-60, -80), "local")
-        self.assertEqual(select_preferred_link(-85, -70), "peer")
-        self.assertEqual(select_preferred_link(-70, -70, "peer"), "peer")
+        self.assertEqual(select_preferred_link(-85, -70), "slave")
+        self.assertEqual(select_preferred_link(-70, -70, "slave"), "slave")
         self.assertEqual(select_preferred_link(-60, -1), "local")
-        self.assertEqual(select_preferred_link(-1, -73), "peer")
+        self.assertEqual(select_preferred_link(-1, -73), "slave")
         self.assertIsNone(select_preferred_link(-1, -1))
+
+    def test_fresh_slave_wins_when_master_rssi_is_stale(self):
+        self.assertEqual(
+            select_preferred_link_with_freshness(None, False, -73, True),
+            "slave",
+        )
+        self.assertEqual(
+            select_preferred_link_with_freshness(-70, True, None, False),
+            "local",
+        )
+
+    def test_fresh_master_wins_when_slave_rssi_is_stale(self):
+        self.assertEqual(
+            select_preferred_link_with_freshness(-70, True, None, False),
+            "local",
+        )
+
+    def test_only_active_master_with_fresh_slave_requires_pre_scan_handover(self):
+        self.assertTrue(requires_pre_scan_handover("master", True, True))
+        self.assertFalse(requires_pre_scan_handover("master", True, False))
+        self.assertFalse(requires_pre_scan_handover("master", False, True))
+        self.assertFalse(requires_pre_scan_handover("slave", True, True))
 
     def test_selection_stays_pending_when_enforcement_fails(self):
         pending = True
@@ -29,52 +58,20 @@ class MultiAlignmentSchedulerTests(unittest.TestCase):
             pending = not selection_complete
         self.assertTrue(pending)
 
-    def test_single_success_holds_only_failed_unit(self):
+    def test_failed_local_scan_enters_its_own_cooldown(self):
         scheduler = AutoAlignmentScheduler(1, 5, 10, max_attempts=2)
-        scheduler.begin_joint_wait("boot_signal_lost")
-        scheduler.begin_joint_scan()
-        scheduler.complete_joint_session(False, True, now=0)
-        self.assertEqual(scheduler.state, scheduler.PEER_ASSISTED_HOLD)
-        self.assertEqual(scheduler.automatic_attempts, 1)
-
-    def test_both_success_reset_attempts(self):
-        scheduler = AutoAlignmentScheduler(1, 5, 10, max_attempts=2)
-        scheduler.begin_joint_wait("boot_signal_lost")
-        scheduler.begin_joint_scan()
-        scheduler.complete_joint_session(True, True, now=0)
-        self.assertEqual(scheduler.state, scheduler.IDLE)
-        self.assertEqual(scheduler.automatic_attempts, 0)
-
-    def test_both_failure_enters_cooldown_once(self):
-        scheduler = AutoAlignmentScheduler(1, 5, 10, max_attempts=2)
-        scheduler.begin_joint_wait("boot_signal_lost")
-        scheduler.begin_joint_scan()
-        scheduler.complete_joint_session(False, False, now=100)
+        scheduler.begin_local_scan("boot_signal_lost")
+        scheduler.complete_scan("failed", -95, True, now=100)
         self.assertEqual(scheduler.state, scheduler.COOLDOWN)
         self.assertEqual(scheduler.cooldown_until, 110)
         self.assertEqual(scheduler.automatic_attempts, 1)
-
-    def test_peer_eligibility_does_not_enter_aligning(self):
-        scheduler = AutoAlignmentScheduler(2, 5, 10, max_attempts=2)
-        self.assertFalse(scheduler.observe_joint_eligibility(-97, True, now=0))
-        self.assertTrue(scheduler.observe_joint_eligibility(-97, True, now=1))
-        self.assertEqual(scheduler.state, scheduler.IDLE)
-        self.assertTrue(scheduler.begin_joint_scan())
-        self.assertEqual(scheduler.state, scheduler.ALIGNING)
-
-    def test_coordinator_eligibility_can_start_joint_wait_after_boot(self):
-        scheduler = AutoAlignmentScheduler(1, 5, 10, max_attempts=2)
-        self.assertTrue(scheduler.observe_joint_eligibility(-98, True, now=0))
-        self.assertTrue(scheduler.begin_joint_wait("boot_signal_lost"))
-        self.assertEqual(scheduler.state, scheduler.SESSION_WAITING_PEER)
 
 
 class CommandSpoolTests(unittest.TestCase):
     def test_same_command_id_is_idempotent(self):
         command = {
-            "command": "start_joint_scan",
+            "command": "set_link_active",
             "command_id": "command-001",
-            "session_id": "joint-12345678",
         }
         with tempfile.TemporaryDirectory() as temp_dir:
             directory = Path(temp_dir)
