@@ -129,15 +129,22 @@ def is_success_outcome(outcome):
     return outcome in {"target_reached", "best_position_found", "signal_recovered"}
 
 
-def select_preferred_link(local_rssi, slave_rssi, current=None):
-    """Return the side with the stronger RSSI, keeping ties stable.
+def select_preferred_link(local_rssi, slave_rssi, current=None, switch_threshold_db=0):
+    """Return the preferred side, avoiding switches for small RSSI differences.
 
     ``-1`` is the radio's no-signal sentinel: a valid signal on the other
     controller wins.  If both controllers report ``-1``, no link is selected.
-    The caller is responsible for ensuring both samples are fresh.
+    When a link is already active, the other side must be stronger by at least
+    ``switch_threshold_db`` to replace it.  The caller is responsible for
+    ensuring both samples are fresh.
     """
     valid = lambda value: isinstance(value, int) and not isinstance(value, bool)
-    if not valid(local_rssi) or not valid(slave_rssi):
+    if (
+        not valid(local_rssi)
+        or not valid(slave_rssi)
+        or not valid(switch_threshold_db)
+        or switch_threshold_db < 0
+    ):
         return None
     if local_rssi == -1 and slave_rssi == -1:
         return None
@@ -145,6 +152,10 @@ def select_preferred_link(local_rssi, slave_rssi, current=None):
         return "slave"
     if slave_rssi == -1:
         return "local"
+    if current == "local" and slave_rssi > local_rssi:
+        return "slave" if slave_rssi - local_rssi >= switch_threshold_db else "local"
+    if current == "slave" and local_rssi > slave_rssi:
+        return "local" if local_rssi - slave_rssi >= switch_threshold_db else "slave"
     if local_rssi > slave_rssi:
         return "local"
     if slave_rssi > local_rssi:
@@ -153,7 +164,8 @@ def select_preferred_link(local_rssi, slave_rssi, current=None):
 
 
 def select_preferred_link_with_freshness(
-    local_rssi, local_fresh, slave_rssi, slave_fresh, current=None
+    local_rssi, local_fresh, slave_rssi, slave_fresh, current=None,
+    switch_threshold_db=0,
 ):
     """Choose the fresh controller; retain the current link only if both are stale."""
     if slave_fresh and not local_fresh:
@@ -162,7 +174,9 @@ def select_preferred_link_with_freshness(
         return "local"
     if not local_fresh:
         return None
-    return select_preferred_link(local_rssi, slave_rssi, current)
+    return select_preferred_link(
+        local_rssi, slave_rssi, current, switch_threshold_db
+    )
 
 
 def requires_pre_scan_handover(role, local_link_active, slave_rssi_fresh):

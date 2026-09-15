@@ -29,6 +29,20 @@ class MultiAlignmentSchedulerTests(unittest.TestCase):
         self.assertEqual(select_preferred_link(-1, -73), "slave")
         self.assertIsNone(select_preferred_link(-1, -1))
 
+    def test_switch_threshold_keeps_current_link_until_difference_is_large_enough(self):
+        self.assertEqual(
+            select_preferred_link(-80, -79, "local", switch_threshold_db=5),
+            "local",
+        )
+        self.assertEqual(
+            select_preferred_link(-80, -75, "local", switch_threshold_db=5),
+            "slave",
+        )
+        self.assertEqual(
+            select_preferred_link(-75, -80, "slave", switch_threshold_db=5),
+            "local",
+        )
+
     def test_fresh_slave_wins_when_master_rssi_is_stale(self):
         self.assertEqual(
             select_preferred_link_with_freshness(None, False, -73, True),

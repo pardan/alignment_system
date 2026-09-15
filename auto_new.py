@@ -56,6 +56,7 @@ DEFAULTS = {
     "PAIRED_CONTROLLER_IP": "",
     "MULTI_ALIGNMENT_API_TOKEN": "",
     "MULTI_RSSI_COMPARE_INTERVAL_SEC": 5,
+    "MULTI_RSSI_SWITCH_THRESHOLD_DB": 5,
     "MULTI_PAIR_FAILURE_THRESHOLD": 3,
     "target_frequencies_hz": [
         10507500,
@@ -103,6 +104,7 @@ alignment_mode = cfg["ALIGNMENT_MODE"]
 paired_controller_ip = cfg["PAIRED_CONTROLLER_IP"]
 multi_alignment_api_token = cfg["MULTI_ALIGNMENT_API_TOKEN"]
 multi_rssi_compare_interval_sec = cfg["MULTI_RSSI_COMPARE_INTERVAL_SEC"]
+multi_rssi_switch_threshold_db = cfg["MULTI_RSSI_SWITCH_THRESHOLD_DB"]
 multi_pair_failure_threshold = cfg["MULTI_PAIR_FAILURE_THRESHOLD"]
 # SNMP Filter Configuration
 snmp_filter_host           = cfg["IP_RADIO"]
@@ -1255,6 +1257,7 @@ try:
             paired_status.get("rssi"),
             paired_rssi_fresh,
             "local" if link_filters_active else "slave" if link_filters_active is False else None,
+            multi_rssi_switch_threshold_db,
         )
         if preferred is None:
             print(

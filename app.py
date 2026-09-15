@@ -48,6 +48,7 @@ DEFAULT_CONFIG = {
     "PAIRED_CONTROLLER_IP": "",
     "MULTI_ALIGNMENT_API_TOKEN": "",
     "MULTI_RSSI_COMPARE_INTERVAL_SEC": 5,
+    "MULTI_RSSI_SWITCH_THRESHOLD_DB": 5,
     "MULTI_PAIR_FAILURE_THRESHOLD": 3,
     "target_frequencies_hz": [
         10507500,
@@ -213,6 +214,9 @@ def validate_multi_alignment_config(data):
     token = data.get("MULTI_ALIGNMENT_API_TOKEN", "")
     data["MULTI_RSSI_COMPARE_INTERVAL_SEC"] = normalize_positive_integer(
         data.get("MULTI_RSSI_COMPARE_INTERVAL_SEC"), "Multi RSSI comparison interval"
+    )
+    data["MULTI_RSSI_SWITCH_THRESHOLD_DB"] = normalize_non_negative_integer(
+        data.get("MULTI_RSSI_SWITCH_THRESHOLD_DB"), "Multi RSSI switch threshold"
     )
     data["MULTI_PAIR_FAILURE_THRESHOLD"] = normalize_positive_integer(
         data.get("MULTI_PAIR_FAILURE_THRESHOLD"), "Multi paired-controller failure threshold"
