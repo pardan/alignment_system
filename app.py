@@ -21,7 +21,10 @@ DEFAULT_CONFIG = {
     "iteration_actuator": 3,
     "actuator_speed": 0.5,
     "max_try": 1,
-    "360_in_sec": 68
+    "360_in_sec": 68,
+    "tilt_neutral_position_factor": 3.0,
+    "tx_freq_ss": [10507500, 10514500, 10521500, 10528500, 10535500, 10542500],
+    "SNMP_WRITE_COMMUNITY": "public"
 }
 
 # --- Helper Functions ---
@@ -151,6 +154,23 @@ def api_config():
                     return jsonify({"status": "error", "message": "Auto Alignment Max Try must be a value between 1 and 3"}), 400
             except (ValueError, TypeError):
                 return jsonify({"status": "error", "message": "Auto Alignment Max Try must be a valid integer between 1 and 3"}), 400
+
+        try:
+            tilt_neutral_position_factor = float(data['tilt_neutral_position_factor'])
+            if tilt_neutral_position_factor <= 0:
+                raise ValueError
+        except (KeyError, ValueError, TypeError):
+            return jsonify({"status": "error", "message": "Tilt neutral-position factor must be a number greater than 0."}), 400
+        data['tilt_neutral_position_factor'] = tilt_neutral_position_factor
+
+        tx_freq_ss = data.get('tx_freq_ss')
+        if (not isinstance(tx_freq_ss, list) or not tx_freq_ss or
+                any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in tx_freq_ss)):
+            return jsonify({"status": "error", "message": "TX Freq SS must contain one or more positive integer frequencies."}), 400
+
+        if not isinstance(data.get('SNMP_WRITE_COMMUNITY'), str) or not data['SNMP_WRITE_COMMUNITY'].strip():
+            return jsonify({"status": "error", "message": "SNMP Write Community is required."}), 400
+        data['SNMP_WRITE_COMMUNITY'] = data['SNMP_WRITE_COMMUNITY'].strip()
         
         if save_config(data):
             # Reload and restart the service after saving the new config

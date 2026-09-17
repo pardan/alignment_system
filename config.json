@@ -9,5 +9,15 @@
     "iteration_actuator": 3,
     "actuator_speed": 0.5,
     "max_try": 1,
-    "360_in_sec": 68
+    "360_in_sec": 68,
+    "tilt_neutral_position_factor": 3.0,
+    "tx_freq_ss": [
+        10507500,
+        10514500,
+        10521500,
+        10528500,
+        10535500,
+        10542500
+    ],
+    "SNMP_WRITE_COMMUNITY": "public"
 }

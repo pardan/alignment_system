@@ -29,7 +29,10 @@ DEFAULTS = {
     "iteration_actuator": 3,
     "actuator_speed": 0.5,
     "max_try": 1,
-    "360_in_sec": 68
+    "360_in_sec": 68,
+    "tilt_neutral_position_factor": 3.0,
+    "tx_freq_ss": [10507500, 10514500, 10521500, 10528500, 10535500, 10542500],
+    "SNMP_WRITE_COMMUNITY": "public"
 }
 
 def load_config(path=CONFIG_FILE):
@@ -56,10 +59,12 @@ settle_sec         = cfg["settle_sec"]
 iteration_actuator = cfg["iteration_actuator"]
 actuator_speed     = cfg["actuator_speed"]
 max_try            = cfg["max_try"]
+tilt_neutral_position_factor = cfg["tilt_neutral_position_factor"]
+tx_freq_ss          = cfg["tx_freq_ss"]
 # SNMP Filter Configuration
 snmp_filter_host           = cfg["IP_RADIO"]
 snmp_filter_community      = cfg["SNMP_COMMUNITY"]
-snmp_filter_set_community  = "public"
+snmp_filter_set_community  = cfg["SNMP_WRITE_COMMUNITY"]
 snmp_filter_oid            = "1.3.6.1.4.1.1807.113.1.1.1.3"
 snmp_filter_set_oid_base   = "1.3.6.1.4.1.1807.113.1.1.1.4"
 
@@ -678,7 +683,7 @@ def run_once():
 
     # ---- Get SNMP entries with specific values ----
     print("\nGetting SNMP entries with specific values...")
-    target_values = [10507500, 10514500, 10521500, 10528500, 10535500, 10542500]
+    target_values = tx_freq_ss
     snmp_entries = get_entries_with_specific_values(
         snmp_filter_host,
         snmp_filter_community,
@@ -743,8 +748,8 @@ def run_once():
     
     print("Calibration finished (startpoint set).")
 
-    # 3) UP N/2
-    pulse(line_up, actuator_calibrate / 3.0)
+    # 3) Move UP to the configured neutral tilt position.
+    pulse(line_up, actuator_calibrate / tilt_neutral_position_factor)
 
     # 4) Sleep 1s
     time.sleep(1)

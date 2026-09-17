@@ -146,7 +146,10 @@ The system uses a JSON configuration file with the following parameters:
   "iteration_actuator": 3,
   "actuator_speed": 0.5,
   "max_try": 1,
-  "360_in_sec": 68
+  "360_in_sec": 68,
+  "tilt_neutral_position_factor": 3.0,
+  "tx_freq_ss": [10507500, 10514500, 10521500, 10528500, 10535500, 10542500],
+  "SNMP_WRITE_COMMUNITY": "public"
 }
 ```
 
@@ -165,6 +168,9 @@ The system uses a JSON configuration file with the following parameters:
 | `actuator_speed` | Vertical movement speed (seconds) | 0.5 | 0.1-5.0 |
 | `max_try` | Maximum alignment attempts | 1 | 1-3 |
 | `360_in_sec` | Time for full 360° rotation (seconds) | 68 | 30-120 |
+| `tilt_neutral_position_factor` | Divisor used to set the initial upward tilt after calibration | 3.0 | Greater than 0 |
+| `tx_freq_ss` | Frequency list used to select SNMP filter entries | Default six TX frequencies | Positive integer list |
+| `SNMP_WRITE_COMMUNITY` | SNMP community used for filter `snmpset` operations | "public" | Non-empty string |
 
 ### GPIO Pin Configuration
 
