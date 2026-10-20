@@ -32,7 +32,8 @@ DEFAULTS = {
     "360_in_sec": 68,
     "tilt_neutral_position_factor": 3.0,
     "tx_freq_ss": [10507500, 10514500, 10521500, 10528500, 10535500, 10542500],
-    "SNMP_WRITE_COMMUNITY": "public"
+    "SNMP_WRITE_COMMUNITY": "public",
+    "home_fallback_sec": 80
 }
 
 def load_config(path=CONFIG_FILE):
@@ -61,6 +62,7 @@ actuator_speed     = cfg["actuator_speed"]
 max_try            = cfg["max_try"]
 tilt_neutral_position_factor = cfg["tilt_neutral_position_factor"]
 tx_freq_ss          = cfg["tx_freq_ss"]
+home_fallback_sec  = cfg["home_fallback_sec"]  # RIGHT drive time when home sensor is already LOW (faulty)
 # SNMP Filter Configuration
 snmp_filter_host           = cfg["IP_RADIO"]
 snmp_filter_community      = cfg["SNMP_COMMUNITY"]
@@ -372,6 +374,36 @@ def drive_until_low(move_line, sensor_line, poll_interval=0.02, safety_timeout=N
     finally:
         safe_set(move_line, 0)
     return False
+
+def home_stuck_low(sensor_line, samples=5, interval=0.02):
+    """
+    True if sensor_line reads LOW on every sample (~100ms total).
+    Used before homing: a healthy sensor is HIGH away from home; a faulty
+    sensor sits LOW permanently.
+    """
+    for _ in range(samples):
+        if read(sensor_line) != 0:
+            return False
+        time.sleep(interval)
+    return True
+
+def drive_for(move_line, duration_sec, poll_interval=0.02):
+    """
+    Hold move_line HIGH for duration_sec, stopping early on abort.
+    Returns True if the full duration completed, False if aborted.
+    """
+    print(f"Driving RIGHT for {duration_sec:.1f}s (home sensor fallback) ...")
+    safe_set(move_line, 1)
+    t0 = time.time()
+    try:
+        while (time.time() - t0) < duration_sec:
+            if abort_is_active():
+                print("[ABORT] GPIO6 is LOW - aborting during home fallback drive!")
+                return False
+            time.sleep(poll_interval)
+        return True
+    finally:
+        safe_set(move_line, 0)
 
 def format_duration(sec):
     m, s = int(sec // 60), int(sec % 60)
@@ -725,6 +757,13 @@ def run_once():
 
     # 2) RIGHT until GPIO13 goes LOW (startpoint/home)
     def right_to_home():
+        # Faulty home sensor reads LOW before moving: skip waiting for it and
+        # drive RIGHT for home_fallback_sec instead, then continue as homed.
+        if home_stuck_low(line_home):
+            print(f"[HOME] GPIO13 already LOW at start (sensor fault?) - "
+                  f"using {home_fallback_sec}s timed drive instead of waiting for home.")
+            drive_for(line_main, home_fallback_sec)
+            return
         # Optional safety timeout: e.g., 120s (adjust if needed)
         drive_until_low(line_main, line_home, poll_interval=0.02, safety_timeout=None)
 
