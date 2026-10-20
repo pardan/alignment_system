@@ -2,3 +2,5 @@ RUN_THIS.bat
 service.bat
 alignment_system.zip
 update.zip
+__pycache__/
+*.stackdump
