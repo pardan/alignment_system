@@ -11,6 +11,7 @@
     "settle_sec": 0.5,
     "iteration_actuator": 3,
     "actuator_speed": 0.5,
+    "TILT_NEUTRAL_POSITION_FACTOR": 3.0,
     "max_try": 1,
     "360_in_sec": 68,
     "target_frequencies_hz": [

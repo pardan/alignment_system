@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from alignment_scheduler import AutoAlignmentScheduler
+from app import normalize_positive_number
 from multi_alignment import (
     consume_commands,
     determine_role,
@@ -92,6 +93,13 @@ class CommandSpoolTests(unittest.TestCase):
             self.assertTrue(enqueue_command(command, directory))
             self.assertFalse(enqueue_command(command, directory))
             self.assertEqual(consume_commands(directory), [command])
+
+
+class ConfigurationValidationTests(unittest.TestCase):
+    def test_tilt_neutral_position_factor_must_be_positive(self):
+        self.assertEqual(normalize_positive_number(3, "Tilt factor"), 3.0)
+        with self.assertRaises(ValueError):
+            normalize_positive_number(0, "Tilt factor")
 
 
 if __name__ == "__main__":

@@ -45,6 +45,7 @@ DEFAULTS = {
     "settle_sec": 2,
     "iteration_actuator": 3,
     "actuator_speed": 0.5,
+    "TILT_NEUTRAL_POSITION_FACTOR": 3.0,
     "max_try": 1,
     "360_in_sec": 68,
     "AUTO_BOOT_RSSI_MINUS_ONE_COUNT": 5,
@@ -93,6 +94,7 @@ degrees_per_step   = cfg["degrees_per_step"]
 settle_sec         = cfg["settle_sec"]
 iteration_actuator = cfg["iteration_actuator"]
 actuator_speed     = cfg["actuator_speed"]
+tilt_neutral_position_factor = cfg["TILT_NEUTRAL_POSITION_FACTOR"]
 max_try            = cfg["max_try"]
 target_frequencies_hz = cfg["target_frequencies_hz"]
 auto_boot_rssi_minus_one_count = cfg["AUTO_BOOT_RSSI_MINUS_ONE_COUNT"]
@@ -1058,8 +1060,8 @@ def run_once(reason):
     
     print("Calibration finished (startpoint set).")
 
-    # 3) UP N/2
-    pulse(line_up, actuator_calibrate / 3.0)
+    # 3) Return UP toward the configured neutral (0° tilt) position.
+    pulse(line_up, actuator_calibrate / tilt_neutral_position_factor)
 
     # 4) Sleep 1s
     time.sleep(1)

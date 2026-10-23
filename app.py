@@ -7,6 +7,7 @@ import time
 import hmac
 import ipaddress
 import uuid
+import math
 from multi_alignment import (
     enqueue_command,
     determine_local_ip,
@@ -37,6 +38,7 @@ DEFAULT_CONFIG = {
     "settle_sec": 5,
     "iteration_actuator": 3,
     "actuator_speed": 0.5,
+    "TILT_NEUTRAL_POSITION_FACTOR": 3.0,
     "max_try": 1,
     "360_in_sec": 68,
     "AUTO_BOOT_RSSI_MINUS_ONE_COUNT": 5,
@@ -169,6 +171,19 @@ def normalize_non_negative_integer(value, field_name):
         raise ValueError(f"{field_name} must be a whole number of zero or more.")
     if normalized < 0:
         raise ValueError(f"{field_name} must be zero or more.")
+    return normalized
+
+
+def normalize_positive_number(value, field_name):
+    """Return a finite number greater than zero."""
+    if isinstance(value, bool):
+        raise ValueError(f"{field_name} must be a number greater than zero.")
+    try:
+        normalized = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{field_name} must be a number greater than zero.")
+    if not math.isfinite(normalized) or normalized <= 0:
+        raise ValueError(f"{field_name} must be a number greater than zero.")
     return normalized
 
 def normalize_rssi_loss_threshold(value):
@@ -342,6 +357,9 @@ def api_config():
             )
             data["RSSI_WORSENING_TOLERANCE_DB"] = normalize_non_negative_integer(
                 data["RSSI_WORSENING_TOLERANCE_DB"], "RSSI worsening tolerance"
+            )
+            data["TILT_NEUTRAL_POSITION_FACTOR"] = normalize_positive_number(
+                data["TILT_NEUTRAL_POSITION_FACTOR"], "Tilt neutral-position factor"
             )
             data["AUTO_BOOT_RSSI_MINUS_ONE_COUNT"] = normalize_positive_integer(
                 data["AUTO_BOOT_RSSI_MINUS_ONE_COUNT"], "Boot RSSI -1 count"
