@@ -37,6 +37,7 @@ DEFAULTS = {
     "target_rssi": -80,
     "USE_TARGET_RSSI": True,
     "RSSI_WORSENING_TOLERANCE_DB": 3,
+    "RETURN_TO_BEST_OFFSET_SEC": 0.0,
     "IP_RADIO": "172.20.25.6",
     "SNMP_PORT": 161,
     "SNMP_COMMUNITY": "public",
@@ -87,6 +88,7 @@ cfg = load_config()
 target_rssi        = cfg["target_rssi"]
 use_target_rssi    = cfg["USE_TARGET_RSSI"]
 rssi_worsening_tolerance_db = cfg["RSSI_WORSENING_TOLERANCE_DB"]
+return_to_best_offset_sec = float(cfg["RETURN_TO_BEST_OFFSET_SEC"])
 IP_RADIO           = cfg["IP_RADIO"]
 OID_RSSI           = cfg["OID_RSSI"]
 community          = cfg["SNMP_COMMUNITY"]
@@ -723,12 +725,16 @@ def sweep_steps(move_line, reverse_line, name, start_time, snmp_entries=None):
 
     # Return to best position
     pulses_back = H_STEPS - (best_idx + 1)
-    back_sec = gpio_step_sec * pulses_back
+    scanned_back_sec = gpio_step_sec * pulses_back
+    # Configurable correction for rotator overrun/backlash; never reverse the
+    # direction if a negative offset exceeds the scanned return time.
+    back_sec = max(0.0, scanned_back_sec + return_to_best_offset_sec)
     print("\nTarget not met after sweep.")
     print(f"Best RSSI: {best_rssi} dBm at step #{best_idx+1}" +
           (f" (Entry: {best_entry})" if best_entry else ""))
     print(f"Returning to best using "
-          f"{'MAIN' if reverse_line is line_main else 'ALT'} for {back_sec:.2f}s...")
+          f"{'MAIN' if reverse_line is line_main else 'ALT'} for {back_sec:.2f}s "
+          f"(scanned {scanned_back_sec:.2f}s, offset {return_to_best_offset_sec:+.2f}s)...")
 
     if back_sec > 0:
         pulse(reverse_line, back_sec)

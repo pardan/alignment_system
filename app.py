@@ -29,6 +29,7 @@ DEFAULT_CONFIG = {
     "target_rssi": -80,
     "USE_TARGET_RSSI": True,
     "RSSI_WORSENING_TOLERANCE_DB": 3,
+    "RETURN_TO_BEST_OFFSET_SEC": 0.0,
     "IP_RADIO": "172.20.25.5",
     "SNMP_PORT": 161,
     "SNMP_COMMUNITY": "public",
@@ -184,6 +185,18 @@ def normalize_positive_number(value, field_name):
         raise ValueError(f"{field_name} must be a number greater than zero.")
     if not math.isfinite(normalized) or normalized <= 0:
         raise ValueError(f"{field_name} must be a number greater than zero.")
+    return normalized
+
+def normalize_finite_number(value, field_name):
+    """Return a finite number that may be zero or negative."""
+    if isinstance(value, bool):
+        raise ValueError(f"{field_name} must be a number.")
+    try:
+        normalized = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{field_name} must be a number.")
+    if not math.isfinite(normalized):
+        raise ValueError(f"{field_name} must be a number.")
     return normalized
 
 def normalize_rssi_loss_threshold(value):
@@ -357,6 +370,9 @@ def api_config():
             )
             data["RSSI_WORSENING_TOLERANCE_DB"] = normalize_non_negative_integer(
                 data["RSSI_WORSENING_TOLERANCE_DB"], "RSSI worsening tolerance"
+            )
+            data["RETURN_TO_BEST_OFFSET_SEC"] = normalize_finite_number(
+                data["RETURN_TO_BEST_OFFSET_SEC"], "Return-to-best offset"
             )
             data["TILT_NEUTRAL_POSITION_FACTOR"] = normalize_positive_number(
                 data["TILT_NEUTRAL_POSITION_FACTOR"], "Tilt neutral-position factor"

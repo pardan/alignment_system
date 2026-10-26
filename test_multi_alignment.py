@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 from alignment_scheduler import AutoAlignmentScheduler
-from app import normalize_positive_number
+from app import normalize_finite_number, normalize_positive_number
 from multi_alignment import (
     consume_commands,
     determine_role,
@@ -108,6 +108,14 @@ class ConfigurationValidationTests(unittest.TestCase):
         self.assertEqual(normalize_positive_number(3, "Tilt factor"), 3.0)
         with self.assertRaises(ValueError):
             normalize_positive_number(0, "Tilt factor")
+
+    def test_return_to_best_offset_accepts_zero_and_signed_seconds(self):
+        self.assertEqual(normalize_finite_number(0, "Offset"), 0.0)
+        self.assertEqual(normalize_finite_number("1", "Offset"), 1.0)
+        self.assertEqual(normalize_finite_number(-1.5, "Offset"), -1.5)
+        for invalid in (None, "", "abc", float("inf"), True):
+            with self.assertRaises(ValueError):
+                normalize_finite_number(invalid, "Offset")
 
 
 if __name__ == "__main__":
