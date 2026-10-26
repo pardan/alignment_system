@@ -188,6 +188,21 @@ def requires_pre_scan_handover(role, local_link_active, slave_rssi_fresh):
     )
 
 
+def should_activate_local_during_paired_scan(role, local_rssi, local_rssi_fresh):
+    """Let the Master carry the link while a Slave scan has taken its own link down.
+
+    Only a fresh, non ``-1`` Master RSSI qualifies; otherwise enabling the
+    Master link cannot help and the link is left unchanged.
+    """
+    return (
+        role == "master"
+        and local_rssi_fresh is True
+        and isinstance(local_rssi, int)
+        and not isinstance(local_rssi, bool)
+        and local_rssi != -1
+    )
+
+
 class PairedControllerApiClient:
     """Small stdlib-only client for the authenticated paired-controller API."""
 

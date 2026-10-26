@@ -16,6 +16,7 @@ from multi_alignment import (
     requires_pre_scan_handover,
     select_preferred_link,
     select_preferred_link_with_freshness,
+    should_activate_local_during_paired_scan,
 )
 from snmp_filter_integration import (
     get_non_zero_entries,
@@ -1202,6 +1203,9 @@ try:
         if scheduler.state != scheduler.ALIGNING and not scheduler.begin_local_scan(reason):
             print("[MULTI] local recovery scan held by scheduler state or retry limit")
             return None, False
+        # run_once() blocks the main loop, so publish ``aligning`` now; the
+        # Master relies on it to carry the link while this scan takes ours down.
+        publish_multi_status(scheduler)
         outcome = run_once(reason)
         last_scan_outcome = outcome
         last_scan_success = is_success_outcome(outcome)
@@ -1234,6 +1238,37 @@ try:
         print(f"[MULTI] {paired_last_error}")
         return False
 
+    def activate_local_link_during_paired_scan():
+        """Keep a usable link while the Slave scan has disabled its own filters.
+
+        The Slave cannot process ``set_link_active`` during its scan, so only
+        the local link is changed here; normal selection resumes afterwards.
+        """
+        global link_filters_active
+        if not should_activate_local_during_paired_scan(
+            multi_role, latest_rssi, rssi_is_fresh()
+        ):
+            print(
+                "[MULTI] paired-controller scan in progress; local RSSI is not usable "
+                f"(rssi={latest_rssi}, fresh={rssi_is_fresh()}), link unchanged"
+            )
+            return False
+        if link_filters_active is not True:
+            physical_local_active = read_link_filters_active()
+            if physical_local_active is not None:
+                link_filters_active = physical_local_active
+        if link_filters_active is True:
+            print("[MULTI] paired-controller scan in progress; local link already active")
+            return False
+        print(
+            "[MULTI] paired-controller scan in progress; activating local link "
+            f"(local RSSI={latest_rssi} dBm)"
+        )
+        if not set_link_filters_active(True):
+            return False
+        publish_multi_status(scheduler)
+        return True
+
     def update_preferred_link(now, paired_status=None, paired_checked=False):
         """Keep the stronger paired radio active while both controllers are idle."""
         global paired_last_error, link_filters_active
@@ -1249,8 +1284,7 @@ try:
             print("[MULTI] link selection waiting: paired-controller status unavailable")
             return False
         if paired_status.get("scheduler_state") == scheduler.ALIGNING:
-            print("[MULTI] link selection waiting: paired-controller scan is in progress")
-            return False
+            return activate_local_link_during_paired_scan()
         local_rssi_fresh = rssi_is_fresh()
         paired_rssi_fresh = bool(paired_status.get("rssi_fresh"))
         preferred = select_preferred_link_with_freshness(

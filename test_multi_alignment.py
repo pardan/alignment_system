@@ -12,6 +12,7 @@ from multi_alignment import (
     requires_pre_scan_handover,
     select_preferred_link,
     select_preferred_link_with_freshness,
+    should_activate_local_during_paired_scan,
 )
 
 
@@ -65,6 +66,13 @@ class MultiAlignmentSchedulerTests(unittest.TestCase):
         self.assertFalse(requires_pre_scan_handover("master", True, False))
         self.assertFalse(requires_pre_scan_handover("master", False, True))
         self.assertFalse(requires_pre_scan_handover("slave", True, True))
+
+    def test_master_carries_link_during_slave_scan_only_with_usable_rssi(self):
+        self.assertTrue(should_activate_local_during_paired_scan("master", -70, True))
+        self.assertFalse(should_activate_local_during_paired_scan("master", -1, True))
+        self.assertFalse(should_activate_local_during_paired_scan("master", -70, False))
+        self.assertFalse(should_activate_local_during_paired_scan("master", None, True))
+        self.assertFalse(should_activate_local_during_paired_scan("slave", -70, True))
 
     def test_selection_stays_pending_when_enforcement_fails(self):
         pending = True
