@@ -764,8 +764,13 @@ def run_once():
                   f"using {home_fallback_sec}s timed drive instead of waiting for home.")
             drive_for(line_main, home_fallback_sec)
             return
-        # Optional safety timeout: e.g., 120s (adjust if needed)
-        drive_until_low(line_main, line_home, poll_interval=0.02, safety_timeout=None)
+        # Healthy sensor (HIGH): drive until GPIO13 LOW, but give up after
+        # home_fallback_sec (> one full turn) and continue as homed.
+        if not drive_until_low(line_main, line_home, poll_interval=0.02,
+                               safety_timeout=home_fallback_sec):
+            if not abort_is_active():
+                print(f"[HOME] GPIO13 not LOW after {home_fallback_sec}s - "
+                      f"assuming home and continuing.")
 
     t_right = Thread(target=right_to_home, daemon=True)
 
