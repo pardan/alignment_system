@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, Response, render_template, request, jsonify, stream_with_context
 import json
 import os
 import subprocess
@@ -8,6 +8,7 @@ import time
 # --- Configuration ---
 app = Flask(__name__, template_folder='templates', static_folder='static')
 CONFIG_FILE = 'config.json'
+ALLOWED_LOG_SERVICES = {"monitor": "monitor.service", "auto": "auto.service"}
 
 # --- Default Configuration (with new SNMP fields) ---
 DEFAULT_CONFIG = {
@@ -305,6 +306,41 @@ def api_system():
         "cpu_usage": cpu_usage,
         "ram_usage": ram_usage
     })
+
+# == Service Logs API ==
+@app.route('/api/logs/stream/<service_key>', methods=['GET'])
+def stream_service_logs(service_key):
+    """Stream only the two allowlisted systemd unit logs as Server-Sent Events."""
+    service_name = ALLOWED_LOG_SERVICES.get(service_key)
+    if service_name is None:
+        return jsonify({"status": "error", "message": "Unknown log service."}), 404
+
+    def generate():
+        process = None
+        try:
+            process = subprocess.Popen(
+                ["journalctl", "-u", service_name, "-n", "100", "-f", "-o", "cat"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+            for line in iter(process.stdout.readline, ""):
+                yield f"data: {json.dumps(line.rstrip())}\n\n"
+        except OSError as e:
+            yield f"event: error\ndata: {json.dumps(str(e))}\n\n"
+        finally:
+            if process is not None:
+                process.terminate()
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+
+    response = Response(stream_with_context(generate()), mimetype="text/event-stream")
+    response.headers["Cache-Control"] = "no-cache"
+    response.headers["X-Accel-Buffering"] = "no"
+    return response
 
 # --- Webpage Route ---
 @app.route('/')

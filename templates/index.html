@@ -14,6 +14,8 @@
         .alert-exit-active { opacity: 0; transform: translateY(-20px); transition: opacity 300ms, transform 300ms; }
         .content-section { display: none; }
         .content-section.active { display: block; }
+        .log-console { min-height: 460px; max-height: 68vh; overflow: auto; margin: 0; padding: 15px; color: #d8ebff; background: #06101d; border: 1px solid #263c57; border-radius: 10px; font: 12px/1.55 ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; white-space: pre-wrap; word-break: break-word; }
+        @media (max-width: 700px) { .log-console { min-height: 330px; max-height: 50vh; } }
     </style>
 </head>
 <body class="bg-slate-900 text-white">
@@ -70,6 +72,14 @@
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path>
                     </svg>
                     System Status
+                </a>
+            </li>
+            <li>
+                <a href="#logs" class="nav-link flex items-center p-3 rounded-lg text-slate-300 hover:bg-slate-700 transition-colors">
+                    <svg class="w-6 h-6 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h10"></path>
+                    </svg>
+                    Service Logs
                 </a>
             </li>
         </ul>
@@ -210,6 +220,36 @@
                 </form>
             </div>
 
+            <!-- Service Logs Page -->
+            <div id="logs" class="content-section">
+                <div class="flex flex-wrap justify-between items-start gap-4 mb-6">
+                    <div>
+                        <h2 class="text-3xl font-bold">Service Logs</h2>
+                        <p class="text-sm text-slate-400 mt-1">Menampilkan 100 baris terakhir, kemudian mengikuti log baru secara real-time.</p>
+                    </div>
+                    <div class="flex gap-3">
+                        <button type="button" id="pause-logs" class="py-2 px-4 rounded-md text-sm font-medium bg-slate-700 hover:bg-slate-600 border border-slate-600">Pause</button>
+                        <button type="button" id="clear-logs" class="py-2 px-4 rounded-md text-sm font-medium bg-slate-700 hover:bg-slate-600 border border-slate-600">Clear</button>
+                    </div>
+                </div>
+                <div class="grid grid-cols-1 xl:grid-cols-2 gap-6">
+                    <section class="min-w-0">
+                        <div class="flex justify-between items-center mb-2">
+                            <h3 class="text-sm font-semibold text-slate-300">monitor.service</h3>
+                            <span id="monitor-log-status" class="text-xs text-slate-400">Connecting…</span>
+                        </div>
+                        <pre id="monitor-log-console" class="log-console" aria-live="polite"></pre>
+                    </section>
+                    <section class="min-w-0">
+                        <div class="flex justify-between items-center mb-2">
+                            <h3 class="text-sm font-semibold text-slate-300">auto.service</h3>
+                            <span id="auto-log-status" class="text-xs text-slate-400">Connecting…</span>
+                        </div>
+                        <pre id="auto-log-console" class="log-console" aria-live="polite"></pre>
+                    </section>
+                </div>
+            </div>
+
             <!-- system status Page -->
 <div id="status" class="content-section">
     <h2 class="text-3xl font-bold mb-6">System Status</h2>
@@ -332,10 +372,58 @@
                 return ledElements;
             };
 
+            // --- Service Logs (SSE, only while the Logs page is open) ---
+            const LOG_SERVICES = ['monitor', 'auto'];
+            const MAX_LOG_LINES = 1200;
+            let logStreams = {};
+            let logsPaused = false;
+
+            const appendLog = (service, line) => {
+                if (logsPaused) return;
+                const consoleEl = document.getElementById(`${service}-log-console`);
+                const nearBottom = consoleEl.scrollHeight - consoleEl.scrollTop - consoleEl.clientHeight < 32;
+                consoleEl.append(document.createTextNode(`${line}\n`));
+                while (consoleEl.childNodes.length > MAX_LOG_LINES) consoleEl.removeChild(consoleEl.firstChild);
+                if (nearBottom) consoleEl.scrollTop = consoleEl.scrollHeight;
+            };
+
+            const stopLogStreams = () => {
+                Object.values(logStreams).forEach(stream => stream.close());
+                logStreams = {};
+            };
+
+            const startLogStreams = () => {
+                if (Object.keys(logStreams).length) return;
+                logsPaused = false;
+                document.getElementById('pause-logs').textContent = 'Pause';
+                LOG_SERVICES.forEach(service => {
+                    const statusEl = document.getElementById(`${service}-log-status`);
+                    statusEl.textContent = 'Connecting…';
+                    document.getElementById(`${service}-log-console`).textContent = '';
+                    const stream = new EventSource(`/api/logs/stream/${service}`);
+                    logStreams[service] = stream;
+                    stream.onopen = () => { statusEl.textContent = 'Live'; };
+                    stream.onmessage = event => appendLog(service, JSON.parse(event.data));
+                    stream.onerror = () => { statusEl.textContent = 'Disconnected; retrying…'; };
+                });
+            };
+
+            document.getElementById('pause-logs').addEventListener('click', () => {
+                logsPaused = !logsPaused;
+                document.getElementById('pause-logs').textContent = logsPaused ? 'Resume' : 'Pause';
+                LOG_SERVICES.forEach(service => {
+                    document.getElementById(`${service}-log-status`).textContent =
+                        logsPaused ? 'Paused' : (logStreams[service] ? 'Live' : 'Connecting…');
+                });
+            });
+            document.getElementById('clear-logs').addEventListener('click', () => {
+                LOG_SERVICES.forEach(service => { document.getElementById(`${service}-log-console`).textContent = ''; });
+            });
+
             // --- Navigation ---
             const navLinks = document.querySelectorAll('.nav-link');
             const contentSections = document.querySelectorAll('.content-section');
-            
+
             function navigate() {
                 const hash = window.location.hash || '#radio';
                 contentSections.forEach(section => {
@@ -344,6 +432,7 @@
                 navLinks.forEach(link => {
                     link.classList.toggle('bg-slate-700', link.getAttribute('href') === hash);
                 });
+                if (hash === '#logs') startLogStreams(); else stopLogStreams();
             }
             window.addEventListener('hashchange', navigate);
             navigate(); // Initial page load
